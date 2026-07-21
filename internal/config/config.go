@@ -67,9 +67,12 @@ func Default() Config {
 		// commands run) instead of a silent wait. --verbose is required by
 		// Claude when stream-json is used with -p. acceptEdits lets the fix step
 		// edit files without an interactive prompt (safe: only in the worktree).
+		// --include-partial-messages streams thinking/text token-by-token, so the
+		// live feed updates continuously instead of only when a (possibly very
+		// long) thinking block finishes.
 		Agent: &Agent{Cmd: []string{
 			"claude", "-p",
-			"--output-format", "stream-json", "--verbose",
+			"--output-format", "stream-json", "--verbose", "--include-partial-messages",
 			"--permission-mode", "acceptEdits",
 		}},
 		MaxAgentAttempts: 2,

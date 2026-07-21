@@ -149,6 +149,15 @@ type streamEvent struct {
 			Input    json.RawMessage `json:"input"`
 		} `json:"content"`
 	} `json:"message"`
+	// Event carries token-level deltas when --include-partial-messages is on.
+	Event *struct {
+		Type  string `json:"type"` // e.g. content_block_delta
+		Delta *struct {
+			Type     string `json:"type"` // thinking_delta | text_delta
+			Thinking string `json:"thinking"`
+			Text     string `json:"text"`
+		} `json:"delta"`
+	} `json:"event"`
 	Result string `json:"result"` // present on the final {"type":"result"} event
 }
 
@@ -157,44 +166,91 @@ type streamEvent struct {
 func parseStream(r io.Reader, activity onActivity) string {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // large lines (tool results)
-	var result string
+	emit := func(s string) {
+		if activity != nil && s != "" {
+			activity(s)
+		}
+	}
+
+	var result, thinkBuf string
+	sawStream := false // true once partial-message deltas appear
+
 	for sc.Scan() {
 		var ev streamEvent
 		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
 			continue // ignore non-JSON / partial lines
 		}
 		switch ev.Type {
-		case "assistant":
-			if ev.Message == nil || activity == nil {
+		case "stream_event":
+			// Token-level deltas (partial messages). Stream thinking live,
+			// flushing readable segments as they complete.
+			sawStream = true
+			if ev.Event == nil || ev.Event.Delta == nil || ev.Event.Delta.Type != "thinking_delta" {
 				continue
 			}
-			// A review spends most of its time in "thinking" blocks (not tool
-			// calls), so surfacing those is what makes the feed live.
+			var segs []string
+			thinkBuf += ev.Event.Delta.Thinking
+			segs, thinkBuf = splitThinking(thinkBuf)
+			for _, s := range segs {
+				emit("thinking · " + snippet(s))
+			}
+
+		case "assistant":
+			if ev.Message == nil {
+				continue
+			}
+			// Tools always come from the aggregated message (full input). When
+			// partial messages are on, thinking/text are handled via deltas
+			// above, so skip them here to avoid duplicates.
 			for _, c := range ev.Message.Content {
 				switch c.Type {
 				case "tool_use":
-					activity(describeTool(c.Name, c.Input))
+					emit(describeTool(c.Name, c.Input))
 				case "thinking":
-					if s := snippet(c.Thinking); s != "" {
-						activity("thinking · " + s)
+					if !sawStream {
+						emit("thinking · " + snippet(c.Thinking))
 					}
 				case "text":
-					// Skip the final JSON payload itself — it's the result, not
-					// a narration step, and would clutter the feed.
-					t := strings.TrimSpace(c.Text)
-					if t == "" || strings.HasPrefix(t, "[") || strings.HasPrefix(t, "{") {
+					if sawStream {
 						continue
 					}
-					if s := snippet(t); s != "" {
-						activity(s)
+					t := strings.TrimSpace(c.Text)
+					if t == "" || strings.HasPrefix(t, "[") || strings.HasPrefix(t, "{") {
+						continue // that's the JSON result, not narration
 					}
+					emit(snippet(t))
 				}
 			}
+
 		case "result":
 			result = strings.TrimSpace(ev.Result)
 		}
 	}
 	return result
+}
+
+// splitThinking pulls complete, readable segments out of accumulated thinking
+// text, returning them plus the not-yet-complete remainder. It breaks on
+// newlines and sentence ends so the live feed shows whole thoughts, not tokens.
+func splitThinking(buf string) (segs []string, rest string) {
+	for {
+		if i := strings.IndexByte(buf, '\n'); i >= 0 {
+			if s := strings.TrimSpace(buf[:i]); s != "" {
+				segs = append(segs, s)
+			}
+			buf = buf[i+1:]
+			continue
+		}
+		// No newline: flush up to the last sentence end once it's long enough.
+		if j := strings.LastIndex(buf, ". "); j >= 0 && len(buf) > 50 {
+			if s := strings.TrimSpace(buf[:j+1]); s != "" {
+				segs = append(segs, s)
+			}
+			buf = strings.TrimSpace(buf[j+2:])
+		}
+		break
+	}
+	return segs, buf
 }
 
 // describeTool turns a tool call into a short activity line.
