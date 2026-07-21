@@ -45,8 +45,15 @@ review-lens pr 1234   # review a specific PR by number
 ```
 
 `pr` is the safe, read-only path: it pulls the PR diff via `gh pr diff`, has the
-agent review it, and prints findings. Nothing is committed, pushed, or edited —
+agent review it, and shows findings. Nothing is committed, pushed, or edited —
 ideal when the branch is already pushed and the PR exists.
+
+In a real terminal, `pr` opens an interactive TUI: a **live view** of what the
+agent is doing (files read, commands run) with a spinner + elapsed timer while
+it works, then a navigable **findings viewer** (`j/k` move, `g/G` top/bottom,
+`q` quit). Piped or non-interactive, it prints the plain colour report instead.
+The live view requires an agent that emits Claude's `--output-format stream-json`
+(the default agent config does); other agents fall back to the plain path.
 
 ## Config (`.review-lens.json`)
 

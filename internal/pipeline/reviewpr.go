@@ -8,6 +8,7 @@ import (
 
 	"github.com/izstoev10/review-lens/internal/agent"
 	"github.com/izstoev10/review-lens/internal/config"
+	"github.com/izstoev10/review-lens/internal/tui"
 )
 
 // ReviewPR reviews an already-pushed pull request, read-only. It fetches the
@@ -38,8 +39,17 @@ func ReviewPR(dir, number string, cfg config.Config, log io.Writer, interactive 
 	if number != "" {
 		target = "PR #" + number
 	}
+	prompt := agent.ReviewPrompt(diff)
+
+	// Best experience: an interactive terminal + a streaming agent gets the live
+	// TUI (activity while it works, then findings). Otherwise fall back to a
+	// plain run: capture output, then render (static TUI if interactive).
+	if interactive && agent.CanStream(cfg.Agent) {
+		return tui.RunReview(dir, cfg.Agent, prompt, "Reviewing "+target)
+	}
+
 	fmt.Fprintf(log, "review-lens: reviewing %s...\n", target)
-	raw, err := agent.Review(dir, cfg.Agent, agent.ReviewPrompt(diff), log)
+	raw, err := agent.Review(dir, cfg.Agent, prompt, log)
 	if err != nil {
 		return err
 	}

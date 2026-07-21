@@ -63,7 +63,15 @@ func Default() Config {
 			// Placeholder — replace with your project's real checks.
 			{Name: "example", Cmd: []string{"echo", "configure your checks in .review-lens.json"}},
 		},
-		Agent:            &Agent{Cmd: []string{"claude", "-p", "--permission-mode", "acceptEdits"}},
+		// stream-json lets review-lens show Claude's activity live (files read,
+		// commands run) instead of a silent wait. --verbose is required by
+		// Claude when stream-json is used with -p. acceptEdits lets the fix step
+		// edit files without an interactive prompt (safe: only in the worktree).
+		Agent: &Agent{Cmd: []string{
+			"claude", "-p",
+			"--output-format", "stream-json", "--verbose",
+			"--permission-mode", "acceptEdits",
+		}},
 		MaxAgentAttempts: 2,
 		Review:           true,
 		BaseBranch:       "main",
