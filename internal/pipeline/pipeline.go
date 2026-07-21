@@ -17,6 +17,7 @@ import (
 	"github.com/izstoev10/review-lens/internal/config"
 	"github.com/izstoev10/review-lens/internal/findings"
 	"github.com/izstoev10/review-lens/internal/gitx"
+	"github.com/izstoev10/review-lens/internal/tui"
 )
 
 // Run gates the current branch of the repo containing startDir.
@@ -162,18 +163,27 @@ func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch string, log io.Writ
 		return err
 	}
 	fmt.Fprintln(log)
-	showReview(raw, log)
+	showReview(raw, log, false) // inside `run`: plain render, no full-screen TUI mid-pipeline
 	return nil
 }
 
-// showReview renders an agent's raw review output as structured findings,
-// falling back to the raw text if it isn't parseable JSON.
-func showReview(raw string, log io.Writer) {
-	if list, ok := findings.Parse(raw); ok {
-		findings.Render(log, list, true)
+// showReview presents an agent's raw review output. When interactive, it opens
+// the bubbletea TUI; otherwise (piped, or mid-`run`) it prints the colourised
+// report. Falls back to raw text if the output isn't parseable JSON, and to the
+// plain report if the TUI can't start.
+func showReview(raw string, log io.Writer, interactive bool) {
+	list, ok := findings.Parse(raw)
+	if !ok {
+		fmt.Fprintln(log, strings.TrimSpace(raw))
 		return
 	}
-	fmt.Fprintln(log, strings.TrimSpace(raw))
+	if interactive && len(list) > 0 {
+		if err := tui.Show(list); err == nil {
+			return
+		}
+		// TUI failed to start (e.g. not a real terminal) — fall through to plain.
+	}
+	findings.Render(log, list, true)
 }
 
 // openPR shells out to the GitHub CLI. It's best-effort: if gh isn't installed

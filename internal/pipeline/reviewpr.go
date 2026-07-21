@@ -17,7 +17,7 @@ import (
 //
 // dir is the repo directory; the agent runs there so it can read the code for
 // context while reviewing.
-func ReviewPR(dir, number string, cfg config.Config, log io.Writer) error {
+func ReviewPR(dir, number string, cfg config.Config, log io.Writer, interactive bool) error {
 	if cfg.Agent == nil {
 		return fmt.Errorf("no agent configured (set \"agent\" in .review-lens.json)")
 	}
@@ -44,7 +44,7 @@ func ReviewPR(dir, number string, cfg config.Config, log io.Writer) error {
 		return err
 	}
 	fmt.Fprintln(log)
-	showReview(raw, log)
+	showReview(raw, log, interactive)
 	return nil
 }
 

@@ -131,5 +131,15 @@ func cmdPR() error {
 	if len(os.Args) > 2 {
 		number = os.Args[2]
 	}
-	return pipeline.ReviewPR(cwd, number, cfg, os.Stdout)
+	return pipeline.ReviewPR(cwd, number, cfg, os.Stdout, isInteractive())
+}
+
+// isInteractive reports whether stdout is a real terminal, so the TUI is only
+// launched when it can actually render (not when output is piped or redirected).
+func isInteractive() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
