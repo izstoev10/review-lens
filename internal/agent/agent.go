@@ -142,10 +142,11 @@ type streamEvent struct {
 	Subtype string `json:"subtype"`
 	Message *struct {
 		Content []struct {
-			Type  string          `json:"type"`
-			Text  string          `json:"text"`
-			Name  string          `json:"name"`
-			Input json.RawMessage `json:"input"`
+			Type     string          `json:"type"`
+			Text     string          `json:"text"`
+			Thinking string          `json:"thinking"`
+			Name     string          `json:"name"`
+			Input    json.RawMessage `json:"input"`
 		} `json:"content"`
 	} `json:"message"`
 	Result string `json:"result"` // present on the final {"type":"result"} event
@@ -167,9 +168,26 @@ func parseStream(r io.Reader, activity onActivity) string {
 			if ev.Message == nil || activity == nil {
 				continue
 			}
+			// A review spends most of its time in "thinking" blocks (not tool
+			// calls), so surfacing those is what makes the feed live.
 			for _, c := range ev.Message.Content {
-				if c.Type == "tool_use" {
+				switch c.Type {
+				case "tool_use":
 					activity(describeTool(c.Name, c.Input))
+				case "thinking":
+					if s := snippet(c.Thinking); s != "" {
+						activity("thinking · " + s)
+					}
+				case "text":
+					// Skip the final JSON payload itself — it's the result, not
+					// a narration step, and would clutter the feed.
+					t := strings.TrimSpace(c.Text)
+					if t == "" || strings.HasPrefix(t, "[") || strings.HasPrefix(t, "{") {
+						continue
+					}
+					if s := snippet(t); s != "" {
+						activity(s)
+					}
 				}
 			}
 		case "result":
@@ -216,6 +234,13 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// snippet returns a short, single-line preview of a (possibly long, multi-line)
+// text or thinking block, suitable for one line in the activity feed.
+func snippet(s string) string {
+	s = strings.TrimSpace(firstLine(strings.TrimSpace(s)))
+	return truncate(s, 90)
 }
 
 // --- public entry points -------------------------------------------------
