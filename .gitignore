@@ -1,0 +1,6 @@
+# Binaries
+/review-lens
+*.exe
+
+# Local editor / OS cruft
+.DS_Store
