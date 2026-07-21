@@ -1,21 +1,43 @@
-// Package agent invokes an AI coding CLI to attempt a fix.
+// Package agent invokes an AI coding CLI to attempt a fix or a review.
 //
-// The contract is intentionally dumb: we build a text prompt describing the
-// failure, run the configured agent command inside the worktree, and let the
-// agent edit files on disk. We do not parse the agent's stdout — success is
-// judged by re-running the checks afterwards. That keeps gate agnostic to which
-// agent you use (claude, codex, opencode, ...).
+// The contract is intentionally dumb: we build a text prompt, run the
+// configured agent command inside the worktree, and (for fixes) let the agent
+// edit files on disk. Fix success is judged by re-running the checks afterwards,
+// never by parsing agent output — which keeps the tool agnostic to which agent
+// you use (claude, codex, opencode, ...).
+//
+// The agent's stdout/stderr is streamed live to the caller's writer so a long
+// run shows progress instead of looking hung.
 package agent
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/izstoev10/review-lens/internal/config"
 )
+
+// maxInput caps how much check output / diff we paste into a prompt. Huge blobs
+// (e.g. a whole monolith's lint log) make the agent slow and rarely help — the
+// first chunk is almost always enough to identify the fix.
+const maxInput = 12_000
+
+// timeout bounds a single agent invocation so a wedged CLI can't hang forever.
+const timeout = 10 * time.Minute
+
+// truncate shortens s to at most max runes, noting how much was dropped.
+func truncate(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + fmt.Sprintf("\n... [truncated %d more characters]", len(s)-max)
+}
 
 // Prompt builds the instruction sent to the agent for a failing check.
 func Prompt(checkName, output string) string {
@@ -29,7 +51,7 @@ Output:
 Rules:
 - Edit files directly to fix the root cause.
 - Do not disable or skip the check.
-- Make the smallest change that makes it pass.`, checkName, strings.TrimSpace(output))
+- Make the smallest change that makes it pass.`, checkName, truncate(output, maxInput))
 }
 
 // ReviewPrompt builds the instruction for reviewing a diff. We ask for concise,
@@ -44,47 +66,49 @@ and do NOT edit any files — this is a read-only review. If there are no
 meaningful issues, say exactly "No blocking findings."
 
 Diff:
-%s`, diff)
+%s`, truncate(diff, maxInput))
 }
 
-// Review runs the agent in read-only mode over a prompt and returns its output
-// (the findings) as text. Unlike Fix, it keeps stdout because that IS the
-// result the user wants to read.
-func Review(dir string, a *config.Agent, prompt string) (string, error) {
+// run executes the agent command with prompt appended as the final argument,
+// inside dir, streaming combined output to progress. It returns everything the
+// agent printed (also captured) so callers that want the text (Review) can use
+// it.
+func run(dir string, a *config.Agent, prompt string, progress io.Writer) (string, error) {
 	if a == nil || len(a.Cmd) == 0 {
 		return "", fmt.Errorf("no agent configured")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	args := append(append([]string{}, a.Cmd[1:]...), prompt)
-	// #nosec G204 — agent command is user-configured.
+	// #nosec G204 — agent command comes from the user's own config, by design.
 	cmd := exec.CommandContext(ctx, a.Cmd[0], args...)
 	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("agent %q review failed: %w\n%s", a.Cmd[0], err, out)
+
+	// Tee output to both the live progress writer and a buffer we return.
+	var buf bytes.Buffer
+	w := io.MultiWriter(&buf, progress)
+	cmd.Stdout = w
+	cmd.Stderr = w
+
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return buf.String(), fmt.Errorf("agent %q timed out after %s", a.Cmd[0], timeout)
 	}
-	return strings.TrimSpace(string(out)), nil
+	if err != nil {
+		return buf.String(), fmt.Errorf("agent %q failed: %w", a.Cmd[0], err)
+	}
+	return strings.TrimSpace(buf.String()), nil
 }
 
-// Fix runs the configured agent inside dir with the given prompt. The prompt is
-// appended as the final argument to the agent command. A generous timeout keeps
-// a hung agent from wedging the whole run.
-func Fix(dir string, a *config.Agent, prompt string) error {
-	if a == nil || len(a.Cmd) == 0 {
-		return fmt.Errorf("no agent configured")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
+// Fix runs the agent to fix a failing check, streaming progress to progress.
+func Fix(dir string, a *config.Agent, prompt string, progress io.Writer) error {
+	_, err := run(dir, a, prompt, progress)
+	return err
+}
 
-	args := append(append([]string{}, a.Cmd[1:]...), prompt)
-	// #nosec G204 — agent command is user-configured.
-	cmd := exec.CommandContext(ctx, a.Cmd[0], args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("agent %q failed: %w\n%s", a.Cmd[0], err, out)
-	}
-	return nil
+// Review runs the agent read-only over a prompt, streaming progress, and returns
+// its findings text.
+func Review(dir string, a *config.Agent, prompt string, progress io.Writer) (string, error) {
+	return run(dir, a, prompt, progress)
 }

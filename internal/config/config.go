@@ -18,10 +18,14 @@ type Check struct {
 	Cmd  []string `json:"cmd"`  // argv, e.g. ["go", "test", "./..."]
 }
 
-// Agent describes how to invoke an AI CLI to attempt a fix.
-// The prompt is appended as the final argument. Example:
+// Agent describes how to invoke an AI CLI. The prompt is appended as the final
+// argument, e.g. {"cmd": ["claude", "-p"]} -> claude -p "<prompt>".
 //
-//	{"cmd": ["claude", "-p"]}  ->  claude -p "<prompt>"
+// For the fix step the agent must be able to edit files non-interactively. With
+// Claude Code that means a headless permission mode; the default below uses
+// --permission-mode acceptEdits. Because every agent run happens inside a
+// throwaway worktree (never your real tree), you can safely widen this to
+// --dangerously-skip-permissions if a fix needs to run commands too.
 type Agent struct {
 	Cmd []string `json:"cmd"`
 }
@@ -59,7 +63,7 @@ func Default() Config {
 			// Placeholder — replace with your project's real checks.
 			{Name: "example", Cmd: []string{"echo", "configure your checks in .review-lens.json"}},
 		},
-		Agent:            &Agent{Cmd: []string{"claude", "-p"}},
+		Agent:            &Agent{Cmd: []string{"claude", "-p", "--permission-mode", "acceptEdits"}},
 		MaxAgentAttempts: 2,
 		Review:           true,
 		BaseBranch:       "main",

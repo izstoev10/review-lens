@@ -119,12 +119,13 @@ func checkAndFix(wt *gitx.Worktree, cfg config.Config, log io.Writer) (agentRan 
 			return agentRan, fmt.Errorf("check %q still failing after %d fix attempt(s)", failed.Name, attempts)
 		}
 
-		fmt.Fprintf(log, "review-lens: attempt %d/%d — asking agent to fix %q\n", i+1, attempts, failed.Name)
+		fmt.Fprintf(log, "review-lens: attempt %d/%d — asking agent to fix %q (live output below)\n", i+1, attempts, failed.Name)
 		agentRan = true
 		prompt := agent.Prompt(failed.Name, failed.Output)
-		if err := agent.Fix(wt.Path, cfg.Agent, prompt); err != nil {
+		if err := agent.Fix(wt.Path, cfg.Agent, prompt, log); err != nil {
 			return agentRan, fmt.Errorf("agent fix failed: %w", err)
 		}
+		fmt.Fprintln(log, "\nreview-lens: agent finished, re-running checks...")
 	}
 }
 
@@ -153,12 +154,11 @@ func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch string, log io.Writ
 		fmt.Fprintf(log, "review-lens: no changes vs %s to review\n", base)
 		return nil
 	}
-	fmt.Fprintf(log, "review-lens: reviewing changes vs %s...\n", base)
-	findings, err := agent.Review(wt.Path, cfg.Agent, agent.ReviewPrompt(diff))
-	if err != nil {
+	fmt.Fprintf(log, "review-lens: reviewing changes vs %s (live output below)...\n\n", base)
+	if _, err := agent.Review(wt.Path, cfg.Agent, agent.ReviewPrompt(diff), log); err != nil {
 		return err
 	}
-	fmt.Fprintf(log, "\n--- review ---\n%s\n--------------\n\n", findings)
+	fmt.Fprintln(log)
 	return nil
 }
 
