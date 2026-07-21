@@ -328,17 +328,6 @@ func sevLabel(s findings.Severity) string {
 	}
 }
 
-func actionStyle(a findings.Action) lipgloss.Style {
-	color := lipgloss.Color("11") // ask-user (yellow)
-	switch a {
-	case findings.AutoFix:
-		color = lipgloss.Color("10") // green
-	case findings.NoOp:
-		color = lipgloss.Color("244") // dim
-	}
-	return lipgloss.NewStyle().Foreground(color)
-}
-
 // --- panel drawing -------------------------------------------------------
 
 var borderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
@@ -355,8 +344,11 @@ func padVisible(s string, w int) string {
 // optional right-aligned status, wrapping the given body lines. Callers are
 // responsible for keeping each body line within the inner width.
 func panel(title, right string, bodyLines []string, width int) string {
-	if width < 24 {
-		width = 24
+	// Use the real terminal width; only guard against tiny values that would
+	// break the border maths. Never clamp *up* to a fixed width, or a narrow
+	// terminal would overflow horizontally.
+	if width < 10 {
+		width = 10
 	}
 	inner := width - 4 // space between "│ " and " │"
 
@@ -397,7 +389,7 @@ func (m model) View() string {
 // a live elapsed timer next to the running one, and an overall status.
 func (m model) pipelinePanel() string {
 	status, statusColor := "running", lipgloss.Color("13")
-	if m.phase == phaseDone {
+	if m.phase == phaseDone || m.phase == phaseFixed {
 		status, statusColor = "done", lipgloss.Color("10")
 	}
 	if m.err != nil || m.fixErr != nil {
@@ -433,7 +425,14 @@ func (m model) pipelinePanel() string {
 // logPanel is the live feed of the agent's actions in its own bordered box.
 func (m model) logPanel() string {
 	inner := m.width - 4
-	max := m.height - len(m.stages) - 9
+	// Reserve rows for the pipeline panel (its stages + borders), the two
+	// pipeline title rows when a title is set, the footer, and the truncation
+	// marker — so the composed view never exceeds m.height.
+	titleRows := 0
+	if m.title != "" {
+		titleRows = 2
+	}
+	max := m.height - len(m.stages) - titleRows - 9
 	if max < 3 {
 		max = 3
 	}
@@ -492,8 +491,7 @@ func (m model) findingsBody() string {
 		if idx == m.cursor {
 			title = titleStyle.Render(title)
 		}
-		act := actionStyle(f.Action).Render(padVisible(string(f.Action), 8))
-		fmt.Fprintf(&b, "%s%s %s %s  %s\n", marker, box, sevStyle(f.Severity).Render(sevLabel(f.Severity)), act, clip(title, m.width-25))
+		fmt.Fprintf(&b, "%s%s %s  %s\n", marker, box, sevStyle(f.Severity).Render(sevLabel(f.Severity)), clip(title, m.width-16))
 	}
 
 	sel := m.items[m.cursor]
@@ -506,8 +504,7 @@ func (m model) findingsBody() string {
 		inner = 20
 	}
 	detail := lipgloss.NewStyle().Width(inner).Render(strings.TrimSpace(sel.Detail))
-	header := sevStyle(sel.Severity).Render(loc) + dimStyle.Render("  ·  ") + actionStyle(sel.Action).Render(string(sel.Action))
-	b.WriteString(boxStyle.Width(inner+2).Render(header+"\n"+detail))
+	b.WriteString(boxStyle.Width(inner+2).Render(sevStyle(sel.Severity).Render(loc)+"\n"+detail))
 	return b.String()
 }
 
@@ -530,14 +527,17 @@ func (m model) footer() string {
 
 // --- helpers -------------------------------------------------------------
 
+// clip shortens s to at most width characters, counting runes (not bytes) so it
+// never cuts a multi-byte character in half.
 func clip(s string, width int) string {
 	if width < 4 {
 		width = 4
 	}
-	if len(s) <= width {
+	r := []rune(s)
+	if len(r) <= width {
 		return s
 	}
-	return s[:width-1] + "…"
+	return string(r[:width-1]) + "…"
 }
 
 func count(list []findings.Finding) (e, w, i int) {
