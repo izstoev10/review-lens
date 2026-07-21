@@ -37,6 +37,8 @@ func main() {
 		err = cmdInit()
 	case "run":
 		err = cmdRun()
+	case "pr":
+		err = cmdPR()
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -54,9 +56,10 @@ func usage() {
 	fmt.Println(`review-lens — pre-push validation gate
 
 Commands:
-  init    Write a starter .review-lens.json into the current repo
-  run     Gate the current branch (checks -> agent fix -> push -> PR)
-  help    Show this help`)
+  init      Write a starter .review-lens.json into the current repo
+  run       Gate the current branch (checks -> agent fix -> review -> push -> PR)
+  pr [num]  Review an already-open PR's diff, read-only (current branch if no num)
+  help      Show this help`)
 }
 
 // configPath returns the path to .gate.json at the repo root of the cwd.
@@ -108,4 +111,25 @@ func cmdRun() error {
 		return err
 	}
 	return pipeline.Run(cwd, cfg, os.Stdout)
+}
+
+func cmdPR() error {
+	path, err := configPath()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	// Optional PR number: `review-lens pr 1234`.
+	var number string
+	if len(os.Args) > 2 {
+		number = os.Args[2]
+	}
+	return pipeline.ReviewPR(cwd, number, cfg, os.Stdout)
 }

@@ -38,8 +38,15 @@ go build -o review-lens . && mv review-lens ~/bin/    # anywhere on your PATH
 cd your-repo
 review-lens init      # writes .review-lens.json
 # edit .review-lens.json to set your checks / agent
-review-lens run       # gate the current branch
+
+review-lens run       # full gate: checks -> fix -> review -> push -> PR
+review-lens pr        # review the current branch's OPEN PR, read-only
+review-lens pr 1234   # review a specific PR by number
 ```
+
+`pr` is the safe, read-only path: it pulls the PR diff via `gh pr diff`, has the
+agent review it, and prints findings. Nothing is committed, pushed, or edited —
+ideal when the branch is already pushed and the PR exists.
 
 ## Config (`.review-lens.json`)
 

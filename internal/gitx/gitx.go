@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -103,6 +104,28 @@ func (w *Worktree) RefExists(ref string) bool {
 // is what a reviewer wants to look at, not unrelated commits already on base.
 func (w *Worktree) DiffSince(base string) (string, error) {
 	return run(w.Path, "diff", "--merge-base", base, "HEAD")
+}
+
+// ChangedFiles returns the paths this branch changed versus its merge-base with
+// base, restricted to files that still exist in the worktree (so deleted files
+// aren't handed to a linter). Used to scope checks/fixes to the diff instead of
+// the whole repo — essential on large monorepos.
+func (w *Worktree) ChangedFiles(base string) ([]string, error) {
+	out, err := run(w.Path, "diff", "--name-only", "--merge-base", base, "HEAD")
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, statErr := os.Stat(filepath.Join(w.Path, line)); statErr == nil {
+			files = append(files, line)
+		}
+	}
+	return files, nil
 }
 
 // CommitAll stages everything and commits with msg. Returns the new commit SHA.
