@@ -372,6 +372,17 @@ func panel(title, right string, bodyLines []string, width int) string {
 	return b.String()
 }
 
+func actionStyle(a findings.Action) lipgloss.Style {
+	color := lipgloss.Color("11") // ask-user (yellow)
+	switch a {
+	case findings.AutoFix:
+		color = lipgloss.Color("10") // green
+	case findings.NoOp:
+		color = lipgloss.Color("244") // dim
+	}
+	return lipgloss.NewStyle().Foreground(color)
+}
+
 // --- view ----------------------------------------------------------------
 
 func (m model) View() string {
@@ -491,7 +502,8 @@ func (m model) findingsBody() string {
 		if idx == m.cursor {
 			title = titleStyle.Render(title)
 		}
-		fmt.Fprintf(&b, "%s%s %s  %s\n", marker, box, sevStyle(f.Severity).Render(sevLabel(f.Severity)), clip(title, m.width-16))
+		act := actionStyle(f.Action).Render(fmt.Sprintf("%-8s", f.Action))
+		fmt.Fprintf(&b, "%s%s %s %s  %s\n", marker, box, sevStyle(f.Severity).Render(sevLabel(f.Severity)), act, clip(title, m.width-25))
 	}
 
 	sel := m.items[m.cursor]
@@ -504,7 +516,8 @@ func (m model) findingsBody() string {
 		inner = 20
 	}
 	detail := lipgloss.NewStyle().Width(inner).Render(strings.TrimSpace(sel.Detail))
-	b.WriteString(boxStyle.Width(inner+2).Render(sevStyle(sel.Severity).Render(loc)+"\n"+detail))
+	header := sevStyle(sel.Severity).Render(loc) + dimStyle.Render("  ·  ") + actionStyle(sel.Action).Render(string(sel.Action))
+	b.WriteString(boxStyle.Width(inner+2).Render(header+"\n"+detail))
 	return b.String()
 }
 

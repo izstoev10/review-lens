@@ -32,6 +32,33 @@ func (s Severity) rank() int {
 	}
 }
 
+// Action says what the review can safely do about a finding. It's the
+// classification the auto-fix loop builds on: only auto-fix findings may be
+// applied without a human in the loop.
+type Action string
+
+const (
+	// AutoFix is objective and safe to fix automatically (e.g. an obvious bug
+	// with one correct fix).
+	AutoFix Action = "auto-fix"
+	// AskUser is intent-sensitive and needs human judgement before any change.
+	AskUser Action = "ask-user"
+	// NoOp is informational; there is nothing to fix.
+	NoOp Action = "no-op"
+)
+
+// normalize maps an action to a known value, failing closed to AskUser for
+// missing or unrecognised values so nothing is auto-fixed unless the agent
+// explicitly said it was safe.
+func (a Action) normalize() Action {
+	switch a {
+	case AutoFix, AskUser, NoOp:
+		return a
+	default:
+		return AskUser
+	}
+}
+
 // Finding is a single review comment.
 type Finding struct {
 	Severity Severity `json:"severity"`
@@ -39,6 +66,7 @@ type Finding struct {
 	Line     int      `json:"line"`
 	Title    string   `json:"title"`
 	Detail   string   `json:"detail"`
+	Action   Action   `json:"action"`
 }
 
 // Parse extracts findings from an agent's raw output. Agents sometimes wrap JSON
@@ -53,6 +81,11 @@ func Parse(raw string) (list []Finding, ok bool) {
 	}
 	if err := json.Unmarshal([]byte(raw[start:end+1]), &list); err != nil {
 		return nil, false
+	}
+	// Fail closed: any missing or unrecognised action becomes ask-user, so the
+	// auto-fix loop never touches a finding the agent didn't explicitly clear.
+	for i := range list {
+		list[i].Action = list[i].Action.normalize()
 	}
 	sort.SliceStable(list, func(i, j int) bool {
 		return list[i].Severity.rank() < list[j].Severity.rank()
@@ -115,6 +148,17 @@ func (s Severity) label() string {
 	}
 }
 
+func (a Action) color() string {
+	switch a {
+	case AutoFix:
+		return green
+	case NoOp:
+		return dim
+	default: // AskUser
+		return yellow
+	}
+}
+
 // Render writes findings to w as a compact, colourised report with a summary
 // header, e.g.:
 //
@@ -147,7 +191,8 @@ func Render(w io.Writer, list []Finding, color bool) {
 			loc = fmt.Sprintf("%s:%d", f.File, f.Line)
 		}
 		sev := paint(color, bold+f.Severity.color(), f.Severity.label())
-		fmt.Fprintf(w, "%s %s\n", sev, paint(color, bold, f.Title))
+		act := paint(color, f.Action.color(), string(f.Action))
+		fmt.Fprintf(w, "%s %s  %s\n", sev, paint(color, bold, f.Title), act)
 		fmt.Fprintf(w, "      %s\n", paint(color, dim, loc))
 		if d := strings.TrimSpace(f.Detail); d != "" {
 			for _, line := range wrap(d, 92) {
