@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit reads this file from the repository's default branch (main), so it
+# takes effect on PRs opened after this lands on main. We turn OFF automatic
+# reviews (these PRs are largely agent-authored); request one on demand with
+# `@coderabbitai review`.
+reviews:
+  auto_review:
+    enabled: false
