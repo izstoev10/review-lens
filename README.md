@@ -86,8 +86,22 @@ default agent config does); other agents fall back to the plain path.
   to only report failures instead of fixing/reviewing.
 - **review** (advisory): after checks pass, the agent reviews this branch's diff
   against **baseBranch** and prints findings. It never blocks the push.
+- **reviewGuidancePath** points to the editable review-criteria file (see below).
+  Omit it to use the default location.
 - Fix success is judged by re-running the checks, never by parsing agent output
   — which is why any agent CLI works.
+
+### Review guidance (`.review-lens.guidance.md`)
+
+*What* the agent flags — the criteria, the error/warning/info severity rubric,
+and house-style expectations — lives in an editable markdown file, not compiled
+into the binary. `review-lens init` writes a starter `.review-lens.guidance.md`;
+edit it to tune reviews and the change takes effect on the next run, no rebuild
+needed. Delete the file and review-lens falls back to a built-in default. Point
+`reviewGuidancePath` elsewhere to use a different file.
+
+Only the criteria are editable — the structured JSON findings format is fixed,
+so tuning the guidance can never break how findings are parsed or rendered.
 
 ### Auth / models
 
@@ -103,6 +117,7 @@ main.go                 CLI entrypoint: init | run | help
 internal/config         load/save .review-lens.json  (stdlib only)
 internal/gitx           git wrappers: worktree lifecycle, diff, push
 internal/checks         run configured commands, report pass/fail
+internal/guidance       load editable review criteria (fallback to default)
 internal/agent          build prompt + invoke the agent CLI
 internal/pipeline       orchestrates the whole run
 ```

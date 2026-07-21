@@ -17,6 +17,7 @@ import (
 	"github.com/izstoev10/review-lens/internal/config"
 	"github.com/izstoev10/review-lens/internal/findings"
 	"github.com/izstoev10/review-lens/internal/gitx"
+	"github.com/izstoev10/review-lens/internal/guidance"
 	"github.com/izstoev10/review-lens/internal/tui"
 )
 
@@ -71,7 +72,10 @@ func Run(startDir string, cfg config.Config, log io.Writer) error {
 	// 4. Review the committed changes just before pushing. Advisory only —
 	//    findings are printed for the human; they do not block the push.
 	if cfg.Review && cfg.Agent != nil {
-		if err := reviewDiff(wt, cfg, branch, log); err != nil {
+		// Guidance is read from the real repo root (not the worktree) so edits
+		// take effect immediately, without needing to be committed first.
+		reviewGuidance := guidance.Load(root, cfg.ReviewGuidancePath)
+		if err := reviewDiff(wt, cfg, branch, reviewGuidance, log); err != nil {
 			fmt.Fprintf(log, "review-lens: review skipped: %v\n", err)
 		}
 	}
@@ -136,7 +140,7 @@ func checkAndFix(wt *gitx.Worktree, cfg config.Config, log io.Writer) (agentRan 
 // agent to review it, printing findings. Returns an error only if the review
 // couldn't run (e.g. base branch missing) — a review that finds issues is not
 // an error, since findings are advisory.
-func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch string, log io.Writer) error {
+func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance string, log io.Writer) error {
 	base := cfg.BaseBranch
 	if base == "" {
 		base = "main"
@@ -158,7 +162,7 @@ func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch string, log io.Writ
 		return nil
 	}
 	fmt.Fprintf(log, "review-lens: reviewing changes vs %s...\n", base)
-	raw, err := agent.Review(wt.Path, cfg.Agent, agent.ReviewPrompt(diff), log)
+	raw, err := agent.Review(wt.Path, cfg.Agent, agent.ReviewPrompt(reviewGuidance, diff), log)
 	if err != nil {
 		return err
 	}

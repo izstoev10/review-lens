@@ -21,6 +21,7 @@ import (
 
 	"github.com/izstoev10/review-lens/internal/config"
 	"github.com/izstoev10/review-lens/internal/gitx"
+	"github.com/izstoev10/review-lens/internal/guidance"
 	"github.com/izstoev10/review-lens/internal/pipeline"
 )
 
@@ -94,6 +95,21 @@ func cmdInit() error {
 		return err
 	}
 	fmt.Printf("wrote %s — edit it to set your checks and agent.\n", path)
+
+	// Scaffold the editable review guidance alongside the config, so the review
+	// criteria are easy to tune. It's optional: if this file is later removed,
+	// review-lens falls back to the same built-in default it contains now.
+	guidancePath := cfg.ReviewGuidancePath
+	if guidancePath == "" {
+		guidancePath = guidance.DefaultPath
+	}
+	guidanceFull := filepath.Join(root, guidancePath)
+	if _, err := os.Stat(guidanceFull); err != nil {
+		if err := os.WriteFile(guidanceFull, []byte(guidance.Default+"\n"), 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("wrote %s — edit it to tune the review criteria.\n", guidanceFull)
+	}
 	return nil
 }
 

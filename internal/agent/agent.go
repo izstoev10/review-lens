@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/izstoev10/review-lens/internal/config"
+	"github.com/izstoev10/review-lens/internal/guidance"
 )
 
 const (
@@ -49,10 +50,18 @@ Rules:
 - Make the smallest change that makes it pass.`, checkName, truncate(output, maxInput))
 }
 
-// ReviewPrompt builds the instruction for reviewing a diff, requesting a strict
-// JSON array so the output renders as structured findings.
-func ReviewPrompt(diff string) string {
-	return fmt.Sprintf(`Review the following code changes as a senior engineer.
+// ReviewPrompt builds the instruction for reviewing a diff. It composes the
+// editable review guidance (what to flag, severity rubric, house style) with a
+// FIXED output-format contract, so the guidance can be tuned freely while the
+// structured JSON array — and thus the findings parser — never changes. An
+// empty guidance string falls back to the built-in default.
+func ReviewPrompt(reviewGuidance, diff string) string {
+	if strings.TrimSpace(reviewGuidance) == "" {
+		reviewGuidance = guidance.Default
+	}
+	return fmt.Sprintf(`%s
+
+---
 
 Respond with ONLY a JSON array (no prose before or after, no markdown code
 fences). Each element must be:
@@ -63,15 +72,10 @@ fences). Each element must be:
     "title": "short one-line label",
     "detail": "1-3 sentences: the concrete failure mode and why it matters"
   }
-
-Report only real, actionable findings in THESE changes: bugs, security issues,
-risky logic, missing edge cases, or clear maintainability problems. Use "error"
-for likely bugs or security issues, "warning" for real risks/judgment calls,
-"info" for minor suggestions. Do NOT restate what the code does and do NOT
-praise it. If there are no meaningful issues, respond with exactly: []
+If there are no meaningful issues, respond with exactly: []
 
 Diff:
-%s`, truncate(diff, maxInput))
+%s`, strings.TrimSpace(reviewGuidance), truncate(diff, maxInput))
 }
 
 // CanStream reports whether the configured command emits Claude's stream-json.
