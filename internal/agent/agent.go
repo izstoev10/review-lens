@@ -5,9 +5,6 @@
 // edit files on disk. Fix success is judged by re-running the checks afterwards,
 // never by parsing agent output — which keeps the tool agnostic to which agent
 // you use (claude, codex, opencode, ...).
-//
-// The agent's stdout/stderr is streamed live to the caller's writer so a long
-// run shows progress instead of looking hung.
 package agent
 
 import (
@@ -23,9 +20,8 @@ import (
 )
 
 // maxInput caps how much check output / diff we paste into a prompt. Huge blobs
-// (e.g. a whole monolith's lint log) make the agent slow and rarely help — the
-// first chunk is almost always enough to identify the fix.
-const maxInput = 12_000
+// (e.g. a whole monolith's lint log) make the agent slow and rarely help.
+const maxInput = 60_000
 
 // timeout bounds a single agent invocation so a wedged CLI can't hang forever.
 const timeout = 10 * time.Minute
@@ -54,26 +50,37 @@ Rules:
 - Make the smallest change that makes it pass.`, checkName, truncate(output, maxInput))
 }
 
-// ReviewPrompt builds the instruction for reviewing a diff. We ask for concise,
-// actionable findings and nothing else, so the output is readable in a terminal.
+// ReviewPrompt builds the instruction for reviewing a diff. We ask for a strict
+// JSON array so the output can be rendered as structured findings while keeping
+// the reviewer's reasoning in the "detail" field.
 func ReviewPrompt(diff string) string {
 	return fmt.Sprintf(`Review the following code changes as a senior engineer.
 
-Report only real, actionable findings: bugs, security issues, risky logic,
-missing edge cases, or clear maintainability problems. For each, give the file
-and a one-line explanation. Do NOT restate what the code does, do NOT praise it,
-and do NOT edit any files — this is a read-only review. If there are no
-meaningful issues, say exactly "No blocking findings."
+Respond with ONLY a JSON array (no prose before or after, no markdown code
+fences). Each element must be:
+  {
+    "severity": "error" | "warning" | "info",
+    "file": "path/to/file",
+    "line": <integer line number, or 0 if not applicable>,
+    "title": "short one-line label",
+    "detail": "1-3 sentences: the concrete failure mode and why it matters"
+  }
+
+Report only real, actionable findings in THESE changes: bugs, security issues,
+risky logic, missing edge cases, or clear maintainability problems. Use "error"
+for likely bugs or security issues, "warning" for real risks/judgment calls,
+"info" for minor suggestions. Do NOT restate what the code does and do NOT
+praise it. If there are no meaningful issues, respond with exactly: []
 
 Diff:
 %s`, truncate(diff, maxInput))
 }
 
 // run executes the agent command with prompt appended as the final argument,
-// inside dir, streaming combined output to progress. It returns everything the
-// agent printed (also captured) so callers that want the text (Review) can use
-// it.
-func run(dir string, a *config.Agent, prompt string, progress io.Writer) (string, error) {
+// inside dir. Raw agent output is streamed to rawOut; a periodic "still working"
+// heartbeat is written to status (so a silent agent doesn't look hung). It
+// returns everything the agent printed.
+func run(dir string, a *config.Agent, prompt string, rawOut, status io.Writer) (string, error) {
 	if a == nil || len(a.Cmd) == 0 {
 		return "", fmt.Errorf("no agent configured")
 	}
@@ -85,19 +92,14 @@ func run(dir string, a *config.Agent, prompt string, progress io.Writer) (string
 	cmd := exec.CommandContext(ctx, a.Cmd[0], args...)
 	cmd.Dir = dir
 
-	// Tee output to both the live progress writer and a buffer we return.
 	var buf bytes.Buffer
-	w := io.MultiWriter(&buf, progress)
-	cmd.Stdout = w
-	cmd.Stderr = w
+	cmd.Stdout = io.MultiWriter(&buf, rawOut)
+	cmd.Stderr = io.MultiWriter(&buf, rawOut)
 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("starting agent %q: %w", a.Cmd[0], err)
 	}
 
-	// Heartbeat: some agents (notably `claude -p`) print nothing until they
-	// finish, so a long run looks hung. Emit an elapsed-time tick until the
-	// process exits, so the user can see it's still alive.
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	ticker := time.NewTicker(15 * time.Second)
@@ -111,9 +113,10 @@ loop:
 		case err = <-done:
 			break loop
 		case <-ticker.C:
-			fmt.Fprintf(progress, "review-lens: … agent still working (%ds elapsed)\n", int(time.Since(start).Seconds()))
+			fmt.Fprintf(status, "review-lens: … agent still working (%ds elapsed)\n", int(time.Since(start).Seconds()))
 		}
 	}
+
 	if ctx.Err() == context.DeadlineExceeded {
 		return buf.String(), fmt.Errorf("agent %q timed out after %s", a.Cmd[0], timeout)
 	}
@@ -123,14 +126,15 @@ loop:
 	return strings.TrimSpace(buf.String()), nil
 }
 
-// Fix runs the agent to fix a failing check, streaming progress to progress.
+// Fix runs the agent to fix a failing check, streaming its work to progress.
 func Fix(dir string, a *config.Agent, prompt string, progress io.Writer) error {
-	_, err := run(dir, a, prompt, progress)
+	_, err := run(dir, a, prompt, progress, progress)
 	return err
 }
 
-// Review runs the agent read-only over a prompt, streaming progress, and returns
-// its findings text.
-func Review(dir string, a *config.Agent, prompt string, progress io.Writer) (string, error) {
-	return run(dir, a, prompt, progress)
+// Review runs the agent read-only and returns its raw output. Only the
+// heartbeat is written to status; the raw (JSON) output is captured for
+// parsing, not streamed, so the terminal stays clean.
+func Review(dir string, a *config.Agent, prompt string, status io.Writer) (string, error) {
+	return run(dir, a, prompt, io.Discard, status)
 }

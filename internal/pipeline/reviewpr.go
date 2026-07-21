@@ -38,11 +38,13 @@ func ReviewPR(dir, number string, cfg config.Config, log io.Writer) error {
 	if number != "" {
 		target = "PR #" + number
 	}
-	fmt.Fprintf(log, "review-lens: reviewing %s (live output below)...\n\n", target)
-	if _, err := agent.Review(dir, cfg.Agent, agent.ReviewPrompt(diff), log); err != nil {
+	fmt.Fprintf(log, "review-lens: reviewing %s...\n", target)
+	raw, err := agent.Review(dir, cfg.Agent, agent.ReviewPrompt(diff), log)
+	if err != nil {
 		return err
 	}
 	fmt.Fprintln(log)
+	showReview(raw, log)
 	return nil
 }
 

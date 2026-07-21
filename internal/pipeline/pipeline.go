@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 
 	"github.com/izstoev10/review-lens/internal/agent"
 	"github.com/izstoev10/review-lens/internal/checks"
 	"github.com/izstoev10/review-lens/internal/config"
+	"github.com/izstoev10/review-lens/internal/findings"
 	"github.com/izstoev10/review-lens/internal/gitx"
 )
 
@@ -154,12 +156,24 @@ func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch string, log io.Writ
 		fmt.Fprintf(log, "review-lens: no changes vs %s to review\n", base)
 		return nil
 	}
-	fmt.Fprintf(log, "review-lens: reviewing changes vs %s (live output below)...\n\n", base)
-	if _, err := agent.Review(wt.Path, cfg.Agent, agent.ReviewPrompt(diff), log); err != nil {
+	fmt.Fprintf(log, "review-lens: reviewing changes vs %s...\n", base)
+	raw, err := agent.Review(wt.Path, cfg.Agent, agent.ReviewPrompt(diff), log)
+	if err != nil {
 		return err
 	}
 	fmt.Fprintln(log)
+	showReview(raw, log)
 	return nil
+}
+
+// showReview renders an agent's raw review output as structured findings,
+// falling back to the raw text if it isn't parseable JSON.
+func showReview(raw string, log io.Writer) {
+	if list, ok := findings.Parse(raw); ok {
+		findings.Render(log, list, true)
+		return
+	}
+	fmt.Fprintln(log, strings.TrimSpace(raw))
 }
 
 // openPR shells out to the GitHub CLI. It's best-effort: if gh isn't installed
