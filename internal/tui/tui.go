@@ -328,39 +328,79 @@ func sevLabel(s findings.Severity) string {
 	}
 }
 
+// --- panel drawing -------------------------------------------------------
+
+var borderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+// padVisible right-pads s with spaces to a visible width of w (ANSI-aware).
+func padVisible(s string, w int) string {
+	if d := w - lipgloss.Width(s); d > 0 {
+		return s + strings.Repeat(" ", d)
+	}
+	return s
+}
+
+// panel draws a rounded box with the title embedded in the top border and an
+// optional right-aligned status, wrapping the given body lines. Callers are
+// responsible for keeping each body line within the inner width.
+func panel(title, right string, bodyLines []string, width int) string {
+	// Use the real terminal width; only guard against tiny values that would
+	// break the border maths. Never clamp *up* to a fixed width, or a narrow
+	// terminal would overflow horizontally.
+	if width < 10 {
+		width = 10
+	}
+	inner := width - 4 // space between "│ " and " │"
+
+	left := borderStyle.Render("╭─ ") + titleStyle.Render(title) + " "
+	var rightSeg string
+	if right != "" {
+		rightSeg = " " + right + borderStyle.Render(" ─╮")
+	} else {
+		rightSeg = borderStyle.Render("╮")
+	}
+	dashes := width - lipgloss.Width(left) - lipgloss.Width(rightSeg)
+	if dashes < 0 {
+		dashes = 0
+	}
+	var b strings.Builder
+	b.WriteString(left + borderStyle.Render(strings.Repeat("─", dashes)) + rightSeg + "\n")
+	for _, ln := range bodyLines {
+		b.WriteString(borderStyle.Render("│") + " " + padVisible(ln, inner) + " " + borderStyle.Render("│") + "\n")
+	}
+	b.WriteString(borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯"))
+	return b.String()
+}
+
 // --- view ----------------------------------------------------------------
 
 func (m model) View() string {
-	var body string
 	switch m.phase {
 	case phaseRunning, phaseFixing:
-		body = m.activityBody()
+		return m.pipelinePanel() + "\n" + m.logPanel() + "\n" + footerStyle.Render(m.footer())
 	case phaseFixed:
-		body = m.fixedBody()
+		return m.pipelinePanel() + "\n\n" + m.fixedBody() + "\n" + footerStyle.Render(m.footer())
 	default:
-		body = m.findingsBody()
+		return m.pipelinePanel() + "\n\n" + m.findingsBody() + "\n" + footerStyle.Render(m.footer())
 	}
-	return m.pipelineView() + "\n\n" + body + "\n" + footerStyle.Render(m.footer())
 }
 
-// pipelineView renders the checkpoint panel: each stage with its status icon,
-// and a live elapsed timer next to the running one.
-func (m model) pipelineView() string {
-	status := "running"
-	statusColor := lipgloss.Color("13")
-	if m.phase == phaseDone {
+// pipelinePanel renders the checkpoint panel: each stage with its status icon,
+// a live elapsed timer next to the running one, and an overall status.
+func (m model) pipelinePanel() string {
+	status, statusColor := "running", lipgloss.Color("13")
+	if m.phase == phaseDone || m.phase == phaseFixed {
 		status, statusColor = "done", lipgloss.Color("10")
 	}
 	if m.err != nil || m.fixErr != nil {
 		status, statusColor = "failed", lipgloss.Color("9")
 	}
-	header := titleStyle.Render("Pipeline")
-	if m.title != "" {
-		header += dimStyle.Render("  " + strings.TrimPrefix(m.title, "Reviewing "))
-	}
-	header += "   " + lipgloss.NewStyle().Bold(true).Foreground(statusColor).Render(status)
+	right := lipgloss.NewStyle().Bold(true).Foreground(statusColor).Render(status)
 
 	var rows []string
+	if m.title != "" {
+		rows = append(rows, dimStyle.Render(strings.TrimPrefix(m.title, "Reviewing ")), "")
+	}
 	for _, s := range m.stages {
 		var icon string
 		switch s.status {
@@ -379,28 +419,36 @@ func (m model) pipelineView() string {
 		}
 		rows = append(rows, row)
 	}
-	return header + "\n" + boxStyle.Render(strings.Join(rows, "\n"))
+	return panel("Pipeline", right, rows, m.width)
 }
 
-// activityBody is the live feed of the agent's actions (tail that fits).
-func (m model) activityBody() string {
-	var b strings.Builder
-	max := m.height - 10
+// logPanel is the live feed of the agent's actions in its own bordered box.
+func (m model) logPanel() string {
+	inner := m.width - 4
+	// Reserve rows for the pipeline panel (its stages + borders), the two
+	// pipeline title rows when a title is set, the footer, and the truncation
+	// marker — so the composed view never exceeds m.height.
+	titleRows := 0
+	if m.title != "" {
+		titleRows = 2
+	}
+	max := m.height - len(m.stages) - titleRows - 9
 	if max < 3 {
 		max = 3
 	}
 	acts := m.activities
+	var rows []string
 	if len(acts) > max {
-		b.WriteString(dimStyle.Render(fmt.Sprintf("  … %d earlier\n", len(acts)-max)))
+		rows = append(rows, dimStyle.Render(fmt.Sprintf("… %d earlier", len(acts)-max)))
 		acts = acts[len(acts)-max:]
 	}
 	for _, a := range acts {
-		fmt.Fprintf(&b, "  %s %s\n", dimStyle.Render("→"), clip(a, m.width-4))
+		rows = append(rows, dimStyle.Render("→ ")+clip(a, inner-2))
 	}
 	if len(m.activities) == 0 {
-		b.WriteString(dimStyle.Render("  waiting for the model…\n"))
+		rows = append(rows, dimStyle.Render("waiting for the model…"))
 	}
-	return b.String()
+	return panel("Log", "", rows, m.width)
 }
 
 func (m model) fixedBody() string {
@@ -479,14 +527,17 @@ func (m model) footer() string {
 
 // --- helpers -------------------------------------------------------------
 
+// clip shortens s to at most width characters, counting runes (not bytes) so it
+// never cuts a multi-byte character in half.
 func clip(s string, width int) string {
 	if width < 4 {
 		width = 4
 	}
-	if len(s) <= width {
+	r := []rune(s)
+	if len(r) <= width {
 		return s
 	}
-	return s[:width-1] + "…"
+	return string(r[:width-1]) + "…"
 }
 
 func count(list []findings.Finding) (e, w, i int) {
