@@ -241,3 +241,10 @@ func Review(dir string, a *config.Agent, prompt string, status io.Writer) (strin
 func StreamReview(dir string, a *config.Agent, prompt string, activity func(string)) (string, error) {
 	return execAgent(dir, a, prompt, activity)
 }
+
+// StreamFix runs the agent to apply fixes, streaming activity to the callback.
+// Same mechanism as StreamReview; the difference is only the prompt (which asks
+// the agent to edit files) and that the caller doesn't parse the result.
+func StreamFix(dir string, a *config.Agent, prompt string, activity func(string)) (string, error) {
+	return execAgent(dir, a, prompt, activity)
+}

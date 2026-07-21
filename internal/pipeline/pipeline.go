@@ -163,22 +163,24 @@ func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch string, log io.Writ
 		return err
 	}
 	fmt.Fprintln(log)
-	showReview(raw, log, false) // inside `run`: plain render, no full-screen TUI mid-pipeline
+	// Inside `run`: plain render, no full-screen TUI mid-pipeline (dir/agent
+	// unused because interactive is false).
+	showReview(raw, log, false, "", nil)
 	return nil
 }
 
 // showReview presents an agent's raw review output. When interactive, it opens
-// the bubbletea TUI; otherwise (piped, or mid-`run`) it prints the colourised
-// report. Falls back to raw text if the output isn't parseable JSON, and to the
-// plain report if the TUI can't start.
-func showReview(raw string, log io.Writer, interactive bool) {
+// the bubbletea TUI (dir + agent enable its fix action); otherwise (piped, or
+// mid-`run`) it prints the colourised report. Falls back to raw text if the
+// output isn't parseable JSON, and to the plain report if the TUI can't start.
+func showReview(raw string, log io.Writer, interactive bool, dir string, a *config.Agent) {
 	list, ok := findings.Parse(raw)
 	if !ok {
 		fmt.Fprintln(log, strings.TrimSpace(raw))
 		return
 	}
 	if interactive && len(list) > 0 {
-		if err := tui.Show(list); err == nil {
+		if err := tui.Show(list, dir, a); err == nil {
 			return
 		}
 		// TUI failed to start (e.g. not a real terminal) — fall through to plain.

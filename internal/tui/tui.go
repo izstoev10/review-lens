@@ -1,7 +1,12 @@
 // Package tui renders a review in an interactive terminal UI built with
 // bubbletea (the Elm architecture: Model state, Update on messages, View to a
-// string). It has two phases: a live "running" view that streams the agent's
-// activity while it works, then a findings viewer once results arrive.
+// string).
+//
+// Long-running work (the agent) runs in a goroutine that writes messages to a
+// channel; a "waitFor" command reads the next message and re-subscribes, so the
+// UI updates live without the model ever holding the tea.Program. Phases:
+//
+//	running → done (findings, selectable) → fixing → fixed
 package tui
 
 import (
@@ -18,38 +23,46 @@ import (
 	"github.com/izstoev10/review-lens/internal/findings"
 )
 
-// --- messages sent into the program --------------------------------------
+// --- messages ------------------------------------------------------------
 
 type activityMsg string
 type doneMsg struct {
 	result string
 	err    error
 }
+type fixDoneMsg struct{ err error }
 type tickMsg time.Time
 
 func tick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-// RunReview streams a review live: it starts the agent in a goroutine, feeds
-// each activity and the final result into the TUI, and shows findings when done.
+// waitFor reads the next message from the event channel. Re-issued after each
+// message so exactly one reader is always outstanding.
+func waitFor(ch <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg { return <-ch }
+}
+
+// --- entry points --------------------------------------------------------
+
+// RunReview streams a review live, then shows selectable findings.
 func RunReview(dir string, a *config.Agent, prompt, title string) error {
-	m := newModel(title)
+	ch := make(chan tea.Msg, 128)
+	m := newModel(title, dir, a, ch)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	go func() {
-		result, err := agent.StreamReview(dir, a, prompt, func(act string) {
-			p.Send(activityMsg(act))
-		})
-		p.Send(doneMsg{result: result, err: err})
+		result, err := agent.StreamReview(dir, a, prompt, func(act string) { ch <- activityMsg(act) })
+		ch <- doneMsg{result: result, err: err}
 	}()
 	_, err := p.Run()
 	return err
 }
 
-// Show displays already-computed findings (no live phase). Used when the agent
-// doesn't stream but we're still interactive.
-func Show(items []findings.Finding) error {
-	m := newModel("")
+// Show displays already-computed findings (no live review phase). dir and a
+// enable the fix action; pass a nil agent to make it read-only.
+func Show(items []findings.Finding, dir string, a *config.Agent) error {
+	ch := make(chan tea.Msg, 128)
+	m := newModel("", dir, a, ch)
 	m.phase = phaseDone
 	m.items = items
 	p := tea.NewProgram(m, tea.WithAltScreen())
@@ -62,45 +75,57 @@ func Show(items []findings.Finding) error {
 type phase int
 
 const (
-	phaseRunning phase = iota
-	phaseDone
+	phaseRunning phase = iota // initial review streaming
+	phaseDone                 // findings shown, selectable
+	phaseFixing               // agent applying selected fixes
+	phaseFixed                // fixes applied (or failed)
 )
 
 type model struct {
-	title   string
+	title    string
+	dir      string
+	agentCfg *config.Agent
+	events   chan tea.Msg
+
 	phase   phase
 	spinner spinner.Model
+	start   time.Time
+	elapsed time.Duration
 
-	// running phase
 	activities []string
-	start      time.Time
-	elapsed    time.Duration
 
-	// done phase
 	items    []findings.Finding
-	rawText  string // shown when the result wasn't parseable findings
-	err      error
+	selected map[int]bool
 	cursor   int
-	width    int
-	height   int
+	rawText  string
+	err      error
+
+	fixErr     error
+	fixedCount int
+
+	width, height int
 }
 
-func newModel(title string) model {
+func newModel(title, dir string, a *config.Agent, ch chan tea.Msg) model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
 	return model{
-		title:   title,
-		phase:   phaseRunning,
-		spinner: s,
-		start:   time.Now(),
-		width:   80,
-		height:  24,
+		title:    title,
+		dir:      dir,
+		agentCfg: a,
+		events:   ch,
+		phase:    phaseRunning,
+		spinner:  s,
+		selected: map[int]bool{},
+		start:    time.Now(),
+		width:    80,
+		height:   24,
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, tick())
+	return tea.Batch(m.spinner.Tick, tick(), waitFor(m.events))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -109,27 +134,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "esc", "ctrl+c":
-			return m, tea.Quit
-		case "j", "down":
-			if m.phase == phaseDone && m.cursor < len(m.items)-1 {
-				m.cursor++
-			}
-		case "k", "up":
-			if m.phase == phaseDone && m.cursor > 0 {
-				m.cursor--
-			}
-		case "g", "home":
-			m.cursor = 0
-		case "G", "end":
-			if len(m.items) > 0 {
-				m.cursor = len(m.items) - 1
-			}
-		}
+		return m.handleKey(msg)
 
 	case activityMsg:
 		m.activities = append(m.activities, string(msg))
+		return m, waitFor(m.events)
 
 	case doneMsg:
 		m.phase = phaseDone
@@ -139,10 +148,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.rawText = strings.TrimSpace(msg.result)
 		}
-		return m, nil
+		return m, waitFor(m.events)
+
+	case fixDoneMsg:
+		m.phase = phaseFixed
+		m.fixErr = msg.err
+		return m, waitFor(m.events)
 
 	case tickMsg:
-		if m.phase == phaseRunning {
+		if m.phase == phaseRunning || m.phase == phaseFixing {
 			m.elapsed = time.Since(m.start)
 			return m, tick()
 		}
@@ -155,12 +169,96 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc", "ctrl+c":
+		return m, tea.Quit
+	}
+	if m.phase != phaseDone {
+		return m, nil
+	}
+	switch msg.String() {
+	case "j", "down":
+		if m.cursor < len(m.items)-1 {
+			m.cursor++
+		}
+	case "k", "up":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+	case "g", "home":
+		m.cursor = 0
+	case "G", "end":
+		if len(m.items) > 0 {
+			m.cursor = len(m.items) - 1
+		}
+	case " ":
+		m.selected[m.cursor] = !m.selected[m.cursor]
+	case "A":
+		for i := range m.items {
+			m.selected[i] = true
+		}
+	case "N":
+		m.selected = map[int]bool{}
+	case "f":
+		return m.startFix()
+	}
+	return m, nil
+}
+
+// startFix kicks off the agent to fix the selected findings, if any and if an
+// agent is configured. It transitions to the fixing phase and restarts the
+// elapsed timer.
+func (m model) startFix() (tea.Model, tea.Cmd) {
+	if m.agentCfg == nil || m.selectedCount() == 0 {
+		return m, nil
+	}
+	m.fixedCount = m.selectedCount()
+	prompt := fixPrompt(m.items, m.selected)
+	dir, a, ch := m.dir, m.agentCfg, m.events
+	go func() {
+		_, err := agent.StreamFix(dir, a, prompt, func(act string) { ch <- activityMsg(act) })
+		ch <- fixDoneMsg{err: err}
+	}()
+	m.phase = phaseFixing
+	m.activities = nil
+	m.start = time.Now()
+	return m, tea.Batch(m.spinner.Tick, tick())
+}
+
+func (m model) selectedCount() int {
+	n := 0
+	for _, v := range m.selected {
+		if v {
+			n++
+		}
+	}
+	return n
+}
+
+func fixPrompt(items []findings.Finding, sel map[int]bool) string {
+	var b strings.Builder
+	b.WriteString("Apply fixes for the following code review findings. Edit files directly to fix the root cause, make the smallest change that resolves each, and do not disable or suppress checks.\n\n")
+	for i, f := range items {
+		if !sel[i] {
+			continue
+		}
+		loc := f.File
+		if f.Line > 0 {
+			loc = fmt.Sprintf("%s:%d", f.File, f.Line)
+		}
+		fmt.Fprintf(&b, "- [%s] %s — %s\n", loc, f.Title, f.Detail)
+	}
+	return b.String()
+}
+
 // --- styling -------------------------------------------------------------
 
 var (
 	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	cursorStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
+	selStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
 	footerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).MarginTop(1)
 	errStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9"))
 	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
@@ -196,33 +294,34 @@ func sevLabel(s findings.Severity) string {
 // --- view ----------------------------------------------------------------
 
 func (m model) View() string {
-	if m.phase == phaseRunning {
-		return m.runningView()
+	switch m.phase {
+	case phaseRunning:
+		return m.workingView(orDefault(m.title, "Reviewing changes"))
+	case phaseFixing:
+		return m.workingView(fmt.Sprintf("Fixing %d finding(s)", m.fixedCount))
+	case phaseFixed:
+		return m.fixedView()
+	default:
+		return m.doneView()
 	}
-	return m.doneView()
 }
 
-func (m model) runningView() string {
+// workingView is the live spinner + activity feed, shared by review and fix.
+func (m model) workingView(head string) string {
 	var b strings.Builder
-	head := m.title
-	if head == "" {
-		head = "Reviewing changes"
-	}
 	fmt.Fprintf(&b, "%s %s  %s\n\n",
 		m.spinner.View(),
 		titleStyle.Render(head),
 		dimStyle.Render(fmt.Sprintf("(%ds)", int(m.elapsed.Seconds()))),
 	)
-
-	// Show the tail of the activity feed that fits the screen.
 	max := m.height - 6
 	if max < 3 {
 		max = 3
 	}
 	acts := m.activities
 	if len(acts) > max {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("  … %d earlier\n", len(acts)-max)))
 		acts = acts[len(acts)-max:]
-		b.WriteString(dimStyle.Render(fmt.Sprintf("  … %d earlier\n", len(m.activities)-max)))
 	}
 	for _, a := range acts {
 		fmt.Fprintf(&b, "  %s %s\n", dimStyle.Render("→"), clip(a, m.width-4))
@@ -230,9 +329,19 @@ func (m model) runningView() string {
 	if len(m.activities) == 0 {
 		b.WriteString(dimStyle.Render("  starting…\n"))
 	}
-
 	b.WriteString(footerStyle.Render("q abort"))
 	return b.String()
+}
+
+func (m model) fixedView() string {
+	if m.fixErr != nil {
+		return errStyle.Render("Fix failed") + "\n\n" +
+			dimStyle.Render(clip(m.fixErr.Error(), m.width)) + "\n\n" +
+			footerStyle.Render("q quit")
+	}
+	return okStyle.Render(fmt.Sprintf("✓ Applied fixes for %d finding(s).", m.fixedCount)) + "\n\n" +
+		dimStyle.Render("Files were edited in your working tree — review with `git diff`, then commit.") + "\n\n" +
+		footerStyle.Render("q quit")
 }
 
 func (m model) doneView() string {
@@ -243,24 +352,33 @@ func (m model) doneView() string {
 	}
 	if len(m.items) == 0 {
 		if m.rawText != "" {
-			return titleStyle.Render("Review (unstructured)") + "\n\n" +
-				m.rawText + "\n\n" + footerStyle.Render("q quit")
+			return titleStyle.Render("Review (unstructured)") + "\n\n" + m.rawText + "\n\n" + footerStyle.Render("q quit")
 		}
 		return okStyle.Render("✓ No blocking findings.") + "\n\n" + footerStyle.Render("q quit")
 	}
 
 	var b strings.Builder
 	e, w, i := count(m.items)
-	b.WriteString(titleStyle.Render("Findings") + dimStyle.Render("  "+summary(e, w, i)) + "\n\n")
+	head := titleStyle.Render("Findings") + dimStyle.Render("  "+summary(e, w, i))
+	if n := m.selectedCount(); n > 0 {
+		head += selStyle.Render(fmt.Sprintf("   %d selected", n))
+	}
+	b.WriteString(head + "\n\n")
 
 	for idx, f := range m.items {
 		marker := "  "
-		title := f.Title
 		if idx == m.cursor {
 			marker = cursorStyle.Render("> ")
+		}
+		box := "[ ]"
+		if m.selected[idx] {
+			box = selStyle.Render("[x]")
+		}
+		title := f.Title
+		if idx == m.cursor {
 			title = titleStyle.Render(title)
 		}
-		fmt.Fprintf(&b, "%s%s  %s\n", marker, sevStyle(f.Severity).Render(sevLabel(f.Severity)), clip(title, m.width-12))
+		fmt.Fprintf(&b, "%s%s %s  %s\n", marker, box, sevStyle(f.Severity).Render(sevLabel(f.Severity)), clip(title, m.width-16))
 	}
 
 	sel := m.items[m.cursor]
@@ -274,11 +392,23 @@ func (m model) doneView() string {
 	}
 	detail := lipgloss.NewStyle().Width(inner).Render(strings.TrimSpace(sel.Detail))
 	b.WriteString(boxStyle.Width(inner+2).Render(sevStyle(sel.Severity).Render(loc)+"\n"+detail) + "\n")
-	b.WriteString(footerStyle.Render("j/k move · g/G top/bottom · q quit"))
+
+	keys := "j/k move · space select · A all · N none · q quit"
+	if m.agentCfg != nil {
+		keys = "j/k move · space select · A all · N none · f fix selected (edits files) · q quit"
+	}
+	b.WriteString(footerStyle.Render(keys))
 	return b.String()
 }
 
 // --- helpers -------------------------------------------------------------
+
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
 
 func clip(s string, width int) string {
 	if width < 4 {

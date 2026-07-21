@@ -54,7 +54,7 @@ func ReviewPR(dir, number string, cfg config.Config, log io.Writer, interactive 
 		return err
 	}
 	fmt.Fprintln(log)
-	showReview(raw, log, interactive)
+	showReview(raw, log, interactive, dir, cfg.Agent)
 	return nil
 }
 
