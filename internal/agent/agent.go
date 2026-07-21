@@ -140,6 +140,7 @@ func execAgent(dir string, a *config.Agent, prompt string, activity onActivity) 
 type streamEvent struct {
 	Type    string `json:"type"`
 	Subtype string `json:"subtype"`
+	Model   string `json:"model"` // present on the system/init event
 	Message *struct {
 		Content []struct {
 			Type     string          `json:"type"`
@@ -181,6 +182,12 @@ func parseStream(r io.Reader, activity onActivity) string {
 			continue // ignore non-JSON / partial lines
 		}
 		switch ev.Type {
+		case "system":
+			// Immediate feedback so the feed isn't empty during the model's
+			// first-token latency on a large prompt.
+			if ev.Subtype == "init" && ev.Model != "" {
+				emit("connected · " + ev.Model)
+			}
 		case "stream_event":
 			// Token-level deltas (partial messages). Stream thinking live,
 			// flushing readable segments as they complete.

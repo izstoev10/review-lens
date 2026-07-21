@@ -4,9 +4,11 @@
 //
 // Long-running work (the agent) runs in a goroutine that writes messages to a
 // channel; a "waitFor" command reads the next message and re-subscribes, so the
-// UI updates live without the model ever holding the tea.Program. Phases:
+// UI updates live without the model ever holding the tea.Program.
 //
-//	running → done (findings, selectable) → fixing → fixed
+// The UI has a checkpoint pipeline (stages ticked off as they complete) above a
+// body that changes with the phase: a live activity feed while the agent works,
+// then a navigable findings viewer, then a fix summary.
 package tui
 
 import (
@@ -37,8 +39,6 @@ func tick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-// waitFor reads the next message from the event channel. Re-issued after each
-// message so exactly one reader is always outstanding.
 func waitFor(ch <-chan tea.Msg) tea.Cmd {
 	return func() tea.Msg { return <-ch }
 }
@@ -49,6 +49,7 @@ func waitFor(ch <-chan tea.Msg) tea.Cmd {
 func RunReview(dir string, a *config.Agent, prompt, title string) error {
 	ch := make(chan tea.Msg, 128)
 	m := newModel(title, dir, a, ch)
+	m.stages = []stage{{"Fetch diff", stageDone}, {"Review", stageRunning}, {"Findings", stagePending}}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	go func() {
 		result, err := agent.StreamReview(dir, a, prompt, func(act string) { ch <- activityMsg(act) })
@@ -58,13 +59,13 @@ func RunReview(dir string, a *config.Agent, prompt, title string) error {
 	return err
 }
 
-// Show displays already-computed findings (no live review phase). dir and a
-// enable the fix action; pass a nil agent to make it read-only.
+// Show displays already-computed findings (no live review phase).
 func Show(items []findings.Finding, dir string, a *config.Agent) error {
 	ch := make(chan tea.Msg, 128)
 	m := newModel("", dir, a, ch)
 	m.phase = phaseDone
 	m.items = items
+	m.stages = []stage{{"Review", stageDone}, {"Findings", stageDone}}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
@@ -75,11 +76,25 @@ func Show(items []findings.Finding, dir string, a *config.Agent) error {
 type phase int
 
 const (
-	phaseRunning phase = iota // initial review streaming
-	phaseDone                 // findings shown, selectable
-	phaseFixing               // agent applying selected fixes
-	phaseFixed                // fixes applied (or failed)
+	phaseRunning phase = iota
+	phaseDone
+	phaseFixing
+	phaseFixed
 )
+
+type stageStatus int
+
+const (
+	stagePending stageStatus = iota
+	stageRunning
+	stageDone
+	stageFailed
+)
+
+type stage struct {
+	name   string
+	status stageStatus
+}
 
 type model struct {
 	title    string
@@ -88,6 +103,7 @@ type model struct {
 	events   chan tea.Msg
 
 	phase   phase
+	stages  []stage
 	spinner spinner.Model
 	start   time.Time
 	elapsed time.Duration
@@ -124,6 +140,15 @@ func newModel(title, dir string, a *config.Agent, ch chan tea.Msg) model {
 	}
 }
 
+func (m *model) setStage(name string, st stageStatus) {
+	for i := range m.stages {
+		if m.stages[i].name == name {
+			m.stages[i].status = st
+			return
+		}
+	}
+}
+
 func (m model) Init() tea.Cmd {
 	return tea.Batch(m.spinner.Tick, tick(), waitFor(m.events))
 }
@@ -143,6 +168,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case doneMsg:
 		m.phase = phaseDone
 		m.err = msg.err
+		if msg.err != nil {
+			m.setStage("Review", stageFailed)
+		} else {
+			m.setStage("Review", stageDone)
+			m.setStage("Findings", stageDone)
+		}
 		if list, ok := findings.Parse(msg.result); ok {
 			m.items = list
 		} else {
@@ -153,6 +184,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case fixDoneMsg:
 		m.phase = phaseFixed
 		m.fixErr = msg.err
+		if msg.err != nil {
+			m.setStage("Apply fixes", stageFailed)
+		} else {
+			m.setStage("Apply fixes", stageDone)
+		}
 		return m, waitFor(m.events)
 
 	case tickMsg:
@@ -206,9 +242,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// startFix kicks off the agent to fix the selected findings, if any and if an
-// agent is configured. It transitions to the fixing phase and restarts the
-// elapsed timer.
 func (m model) startFix() (tea.Model, tea.Cmd) {
 	if m.agentCfg == nil || m.selectedCount() == 0 {
 		return m, nil
@@ -223,6 +256,7 @@ func (m model) startFix() (tea.Model, tea.Cmd) {
 	m.phase = phaseFixing
 	m.activities = nil
 	m.start = time.Now()
+	m.stages = append(m.stages, stage{"Apply fixes", stageRunning})
 	return m, tea.Batch(m.spinner.Tick, tick())
 }
 
@@ -267,6 +301,9 @@ var (
 			BorderForeground(lipgloss.Color("240")).
 			Padding(0, 1).
 			MarginTop(1)
+	doneIcon    = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("✓")
+	pendIcon    = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("○")
+	failIcon    = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("✗")
 )
 
 func sevStyle(s findings.Severity) lipgloss.Style {
@@ -294,27 +331,61 @@ func sevLabel(s findings.Severity) string {
 // --- view ----------------------------------------------------------------
 
 func (m model) View() string {
+	var body string
 	switch m.phase {
-	case phaseRunning:
-		return m.workingView(orDefault(m.title, "Reviewing changes"))
-	case phaseFixing:
-		return m.workingView(fmt.Sprintf("Fixing %d finding(s)", m.fixedCount))
+	case phaseRunning, phaseFixing:
+		body = m.activityBody()
 	case phaseFixed:
-		return m.fixedView()
+		body = m.fixedBody()
 	default:
-		return m.doneView()
+		body = m.findingsBody()
 	}
+	return m.pipelineView() + "\n\n" + body + "\n" + footerStyle.Render(m.footer())
 }
 
-// workingView is the live spinner + activity feed, shared by review and fix.
-func (m model) workingView(head string) string {
+// pipelineView renders the checkpoint panel: each stage with its status icon,
+// and a live elapsed timer next to the running one.
+func (m model) pipelineView() string {
+	status := "running"
+	statusColor := lipgloss.Color("13")
+	if m.phase == phaseDone {
+		status, statusColor = "done", lipgloss.Color("10")
+	}
+	if m.err != nil || m.fixErr != nil {
+		status, statusColor = "failed", lipgloss.Color("9")
+	}
+	header := titleStyle.Render("Pipeline")
+	if m.title != "" {
+		header += dimStyle.Render("  " + strings.TrimPrefix(m.title, "Reviewing "))
+	}
+	header += "   " + lipgloss.NewStyle().Bold(true).Foreground(statusColor).Render(status)
+
+	var rows []string
+	for _, s := range m.stages {
+		var icon string
+		switch s.status {
+		case stageDone:
+			icon = doneIcon
+		case stageFailed:
+			icon = failIcon
+		case stageRunning:
+			icon = m.spinner.View()
+		default:
+			icon = pendIcon
+		}
+		row := fmt.Sprintf("%s %s", icon, s.name)
+		if s.status == stageRunning {
+			row += dimStyle.Render(fmt.Sprintf("   %ds", int(m.elapsed.Seconds())))
+		}
+		rows = append(rows, row)
+	}
+	return header + "\n" + boxStyle.Render(strings.Join(rows, "\n"))
+}
+
+// activityBody is the live feed of the agent's actions (tail that fits).
+func (m model) activityBody() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %s  %s\n\n",
-		m.spinner.View(),
-		titleStyle.Render(head),
-		dimStyle.Render(fmt.Sprintf("(%ds)", int(m.elapsed.Seconds()))),
-	)
-	max := m.height - 6
+	max := m.height - 10
 	if max < 3 {
 		max = 3
 	}
@@ -327,34 +398,28 @@ func (m model) workingView(head string) string {
 		fmt.Fprintf(&b, "  %s %s\n", dimStyle.Render("→"), clip(a, m.width-4))
 	}
 	if len(m.activities) == 0 {
-		b.WriteString(dimStyle.Render("  starting…\n"))
+		b.WriteString(dimStyle.Render("  waiting for the model…\n"))
 	}
-	b.WriteString(footerStyle.Render("q abort"))
 	return b.String()
 }
 
-func (m model) fixedView() string {
+func (m model) fixedBody() string {
 	if m.fixErr != nil {
-		return errStyle.Render("Fix failed") + "\n\n" +
-			dimStyle.Render(clip(m.fixErr.Error(), m.width)) + "\n\n" +
-			footerStyle.Render("q quit")
+		return errStyle.Render("Fix failed") + "\n\n" + dimStyle.Render(clip(m.fixErr.Error(), m.width))
 	}
 	return okStyle.Render(fmt.Sprintf("✓ Applied fixes for %d finding(s).", m.fixedCount)) + "\n\n" +
-		dimStyle.Render("Files were edited in your working tree — review with `git diff`, then commit.") + "\n\n" +
-		footerStyle.Render("q quit")
+		dimStyle.Render("Files were edited in your working tree — review with `git diff`, then commit.")
 }
 
-func (m model) doneView() string {
+func (m model) findingsBody() string {
 	if m.err != nil {
-		return errStyle.Render("Review failed") + "\n\n" +
-			dimStyle.Render(clip(m.err.Error(), m.width)) + "\n\n" +
-			footerStyle.Render("q quit")
+		return errStyle.Render("Review failed") + "\n\n" + dimStyle.Render(clip(m.err.Error(), m.width))
 	}
 	if len(m.items) == 0 {
 		if m.rawText != "" {
-			return titleStyle.Render("Review (unstructured)") + "\n\n" + m.rawText + "\n\n" + footerStyle.Render("q quit")
+			return titleStyle.Render("Review (unstructured)") + "\n\n" + m.rawText
 		}
-		return okStyle.Render("✓ No blocking findings.") + "\n\n" + footerStyle.Render("q quit")
+		return okStyle.Render("✓ No blocking findings.")
 	}
 
 	var b strings.Builder
@@ -391,24 +456,28 @@ func (m model) doneView() string {
 		inner = 20
 	}
 	detail := lipgloss.NewStyle().Width(inner).Render(strings.TrimSpace(sel.Detail))
-	b.WriteString(boxStyle.Width(inner+2).Render(sevStyle(sel.Severity).Render(loc)+"\n"+detail) + "\n")
-
-	keys := "j/k move · space select · A all · N none · q quit"
-	if m.agentCfg != nil {
-		keys = "j/k move · space select · A all · N none · f fix selected (edits files) · q quit"
-	}
-	b.WriteString(footerStyle.Render(keys))
+	b.WriteString(boxStyle.Width(inner+2).Render(sevStyle(sel.Severity).Render(loc)+"\n"+detail))
 	return b.String()
 }
 
-// --- helpers -------------------------------------------------------------
-
-func orDefault(s, def string) string {
-	if s == "" {
-		return def
+func (m model) footer() string {
+	switch m.phase {
+	case phaseRunning, phaseFixing:
+		return "q abort"
+	case phaseDone:
+		if len(m.items) == 0 {
+			return "q quit"
+		}
+		if m.agentCfg != nil {
+			return "j/k move · space select · A all · N none · f fix selected (edits files) · q quit"
+		}
+		return "j/k move · space select · q quit"
+	default:
+		return "q quit"
 	}
-	return s
 }
+
+// --- helpers -------------------------------------------------------------
 
 func clip(s string, width int) string {
 	if width < 4 {
