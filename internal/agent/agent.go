@@ -91,7 +91,29 @@ func run(dir string, a *config.Agent, prompt string, progress io.Writer) (string
 	cmd.Stdout = w
 	cmd.Stderr = w
 
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("starting agent %q: %w", a.Cmd[0], err)
+	}
+
+	// Heartbeat: some agents (notably `claude -p`) print nothing until they
+	// finish, so a long run looks hung. Emit an elapsed-time tick until the
+	// process exits, so the user can see it's still alive.
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	start := time.Now()
+
+	var err error
+loop:
+	for {
+		select {
+		case err = <-done:
+			break loop
+		case <-ticker.C:
+			fmt.Fprintf(progress, "review-lens: … agent still working (%ds elapsed)\n", int(time.Since(start).Seconds()))
+		}
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return buf.String(), fmt.Errorf("agent %q timed out after %s", a.Cmd[0], timeout)
 	}
