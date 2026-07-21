@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/izstoev10/review-lens/internal/guidance"
 )
 
 // Check is a single command gate runs against your code (a linter, tests, etc).
@@ -49,6 +51,12 @@ type Config struct {
 	// BaseBranch is what the review diffs against, e.g. "main". The review
 	// covers commits on the current branch since it diverged from BaseBranch.
 	BaseBranch string `json:"baseBranch"`
+	// ReviewGuidancePath points to a markdown file, resolved relative to the
+	// repo root, whose contents customise the review criteria (what to flag, the
+	// severity rubric, house style). Empty means the default location
+	// (.review-lens.guidance.md); a missing file falls back to a built-in
+	// default. The JSON findings format is fixed and not affected by this file.
+	ReviewGuidancePath string `json:"reviewGuidancePath,omitempty"`
 	// OpenPR, when true, runs `gh pr create` after a successful push.
 	OpenPR bool `json:"openPR"`
 }
@@ -75,10 +83,11 @@ func Default() Config {
 			"--output-format", "stream-json", "--verbose", "--include-partial-messages",
 			"--permission-mode", "acceptEdits",
 		}},
-		MaxAgentAttempts: 2,
-		Review:           true,
-		BaseBranch:       "main",
-		OpenPR:           true,
+		MaxAgentAttempts:   2,
+		Review:             true,
+		BaseBranch:         "main",
+		OpenPR:             true,
+		ReviewGuidancePath: guidance.DefaultPath,
 	}
 }
 

@@ -8,6 +8,8 @@ import (
 
 	"github.com/izstoev10/review-lens/internal/agent"
 	"github.com/izstoev10/review-lens/internal/config"
+	"github.com/izstoev10/review-lens/internal/gitx"
+	"github.com/izstoev10/review-lens/internal/guidance"
 	"github.com/izstoev10/review-lens/internal/tui"
 )
 
@@ -39,7 +41,13 @@ func ReviewPR(dir, number string, cfg config.Config, log io.Writer, interactive 
 	if number != "" {
 		target = "PR #" + number
 	}
-	prompt := agent.ReviewPrompt(diff)
+	// Load review guidance from the repo root (falls back to the built-in
+	// default if there's no guidance file, or if dir isn't inside a repo).
+	root := dir
+	if r, err := gitx.RepoRoot(dir); err == nil {
+		root = r
+	}
+	prompt := agent.ReviewPrompt(guidance.Load(root, cfg.ReviewGuidancePath), diff)
 
 	// Best experience: an interactive terminal + a streaming agent gets the live
 	// TUI (activity while it works, then findings). Otherwise fall back to a
