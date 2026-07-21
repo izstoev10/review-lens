@@ -70,9 +70,17 @@ fences). Each element must be:
     "file": "path/to/file",
     "line": <integer line number, or 0 if not applicable>,
     "title": "short one-line label",
-    "detail": "1-3 sentences: the concrete failure mode and why it matters"
+    "detail": "1-3 sentences: the concrete failure mode and why it matters",
+    "action": "auto-fix" | "ask-user" | "no-op"
   }
 If there are no meaningful issues, respond with exactly: []
+
+For "action", classify how the finding should be handled:
+- "auto-fix": objective with a single correct fix, safe to apply automatically
+  (e.g. an obvious typo, off-by-one, or clear null-check omission).
+- "ask-user": intent-sensitive or a judgement call that needs a human to decide
+  (e.g. an API design choice or a fix with trade-offs). When in doubt, use this.
+- "no-op": informational only; there is nothing to change.
 
 Diff:
 %s`, strings.TrimSpace(reviewGuidance), truncate(diff, maxInput))
