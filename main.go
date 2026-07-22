@@ -19,6 +19,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/izstoev10/review-lens/internal/config"
 	"github.com/izstoev10/review-lens/internal/gitx"
 	"github.com/izstoev10/review-lens/internal/guidance"
@@ -97,7 +99,6 @@ func cmdInit() error {
 	if err := config.Save(path, cfg); err != nil {
 		return err
 	}
-	fmt.Printf("wrote %s — edit it to set your checks and agent.\n", path)
 
 	// Scaffold the editable review guidance alongside the config, so the review
 	// criteria are easy to tune. It's optional: if this file is later removed,
@@ -111,9 +112,52 @@ func cmdInit() error {
 		if err := os.WriteFile(guidanceFull, []byte(guidance.Default+"\n"), 0o644); err != nil {
 			return err
 		}
-		fmt.Printf("wrote %s — edit it to tune the review criteria.\n", guidanceFull)
 	}
+
+	printInitSummary(root, configName, guidancePath)
 	return nil
+}
+
+// printInitSummary renders the branded `init` result: a wordmark panel, a
+// confirmation, an aligned repo/config/review summary, and next steps. Colour is
+// via lipgloss, which auto-degrades to plain text when output isn't a terminal
+// (or NO_COLOR is set), so piped output stays clean.
+func printInitSummary(root, cfgPath, reviewPath string) {
+	var (
+		accent = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
+		dim    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+		ok     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
+		bold   = lipgloss.NewStyle().Bold(true)
+		border = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("240")).
+			Padding(0, 2)
+	)
+
+	wordmark := accent.Render("review") + dim.Render("·") + accent.Render("lens")
+	tagline := dim.Render("AI review + pre-push gate")
+	banner := border.Render(wordmark + "\n" + tagline)
+
+	label := func(s string) string { return dim.Render(fmt.Sprintf("%-8s", s)) }
+	row := func(k, v string) string { return "  " + label(k) + " " + v }
+
+	lines := []string{
+		"",
+		banner,
+		"",
+		"  " + ok.Render("✓") + " " + bold.Render("initialized"),
+		"",
+		row("repo", root),
+		row("config", cfgPath),
+		row("review", reviewPath),
+		"",
+		"  " + dim.Render("Review a PR") + "    " + bold.Render("review-lens ") + accent.Render("pr"),
+		"  " + dim.Render("Gate a branch") + "  " + bold.Render("review-lens ") + accent.Render("run"),
+		"",
+	}
+	for _, l := range lines {
+		fmt.Println(l)
+	}
 }
 
 func cmdRun() error {
