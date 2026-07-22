@@ -55,8 +55,8 @@ Report only real, actionable problems introduced or exposed by THESE changes:
 // DefaultPath. A missing or empty file falls back to Default, so callers always
 // get usable guidance.
 //
-// The file may be a SKILL.md with YAML frontmatter (the Matt Pocock skill
-// convention); the frontmatter is stripped so only the body reaches the review
+// The file may be a SKILL.md with YAML frontmatter
+// the frontmatter is stripped so only the body reaches the review lens
 // prompt.
 func Load(root, relPath string) string {
 	if strings.TrimSpace(relPath) == "" {
