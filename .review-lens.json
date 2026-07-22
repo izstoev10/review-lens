@@ -1,0 +1,17 @@
+{
+  "remote": "origin",
+  "checks": [
+    { "name": "vet", "cmd": ["go", "vet", "./..."] },
+    { "name": "build", "cmd": ["go", "build", "./..."] },
+    { "name": "test", "cmd": ["go", "test", "./..."] }
+  ],
+  "agent": {
+    "cmd": ["claude", "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "acceptEdits"]
+  },
+  "maxAgentAttempts": 2,
+  "maxLoopIterations": 3,
+  "review": true,
+  "baseBranch": "main",
+  "reviewGuidancePath": "skills/code-review/SKILL.md",
+  "openPR": true
+}
