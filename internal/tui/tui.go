@@ -13,6 +13,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -65,6 +67,7 @@ func Show(items []findings.Finding, dir string, a *config.Agent) error {
 	m := newModel("", dir, a, ch)
 	m.phase = phaseDone
 	m.items = items
+	m.decisions = defaultDecisions(items)
 	m.stages = []stage{{"Review", stageDone}, {"Findings", stageDone}}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
@@ -96,6 +99,34 @@ type stage struct {
 	status stageStatus
 }
 
+// decision is the per-finding action the user has chosen in the viewer.
+type decision int
+
+const (
+	decPending decision = iota // undecided
+	decFix                     // apply an agent fix
+	decApprove                 // accept as-is, no change
+	decSkip                    // ignore for now
+)
+
+// defaultDecisions seeds each finding's decision from its action classification
+// so the common path is one keypress: auto-fix findings are pre-marked to fix,
+// no-op findings are pre-skipped, and ask-user findings wait for a human choice.
+func defaultDecisions(items []findings.Finding) map[int]decision {
+	d := make(map[int]decision, len(items))
+	for i, f := range items {
+		switch f.Action {
+		case findings.AutoFix:
+			d[i] = decFix
+		case findings.NoOp:
+			d[i] = decSkip
+		default: // AskUser / unknown
+			d[i] = decPending
+		}
+	}
+	return d
+}
+
 type model struct {
 	title    string
 	dir      string
@@ -110,11 +141,11 @@ type model struct {
 
 	activities []string
 
-	items    []findings.Finding
-	selected map[int]bool
-	cursor   int
-	rawText  string
-	err      error
+	items     []findings.Finding
+	decisions map[int]decision // per-finding: fix / approve / skip / pending
+	cursor    int
+	rawText   string
+	err       error
 
 	fixErr     error
 	fixedCount int
@@ -127,16 +158,16 @@ func newModel(title, dir string, a *config.Agent, ch chan tea.Msg) model {
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
 	return model{
-		title:    title,
-		dir:      dir,
-		agentCfg: a,
-		events:   ch,
-		phase:    phaseRunning,
-		spinner:  s,
-		selected: map[int]bool{},
-		start:    time.Now(),
-		width:    80,
-		height:   24,
+		title:     title,
+		dir:       dir,
+		agentCfg:  a,
+		events:    ch,
+		phase:     phaseRunning,
+		spinner:   s,
+		decisions: map[int]decision{},
+		start:     time.Now(),
+		width:     80,
+		height:    24,
 	}
 }
 
@@ -176,6 +207,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if list, ok := findings.Parse(msg.result); ok {
 			m.items = list
+			m.decisions = defaultDecisions(list)
 		} else {
 			m.rawText = strings.TrimSpace(msg.result)
 		}
@@ -228,26 +260,38 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.items) > 0 {
 			m.cursor = len(m.items) - 1
 		}
-	case " ":
-		m.selected[m.cursor] = !m.selected[m.cursor]
-	case "A":
-		for i := range m.items {
-			m.selected[i] = true
-		}
-	case "N":
-		m.selected = map[int]bool{}
 	case "f":
+		m.decisions[m.cursor] = decFix
+	case "a":
+		m.decisions[m.cursor] = decApprove
+	case "s":
+		m.decisions[m.cursor] = decSkip
+	case " ": // toggle current between fix and pending
+		if m.decisions[m.cursor] == decFix {
+			m.decisions[m.cursor] = decPending
+		} else {
+			m.decisions[m.cursor] = decFix
+		}
+	case "A": // mark all to fix
+		for i := range m.items {
+			m.decisions[i] = decFix
+		}
+	case "N": // clear all to pending
+		for i := range m.items {
+			m.decisions[i] = decPending
+		}
+	case "enter": // apply the agent fix to everything marked fix
 		return m.startFix()
 	}
 	return m, nil
 }
 
 func (m model) startFix() (tea.Model, tea.Cmd) {
-	if m.agentCfg == nil || m.selectedCount() == 0 {
+	if m.agentCfg == nil || m.fixCount() == 0 {
 		return m, nil
 	}
-	m.fixedCount = m.selectedCount()
-	prompt := fixPrompt(m.items, m.selected)
+	m.fixedCount = m.fixCount()
+	prompt := fixPrompt(m.dir, m.items, m.decisions)
 	dir, a, ch := m.dir, m.agentCfg, m.events
 	go func() {
 		_, err := agent.StreamFix(dir, a, prompt, func(act string) { ch <- activityMsg(act) })
@@ -260,21 +304,30 @@ func (m model) startFix() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(m.spinner.Tick, tick())
 }
 
-func (m model) selectedCount() int {
+// fixCount is the number of findings marked to fix.
+func (m model) fixCount() int {
 	n := 0
-	for _, v := range m.selected {
-		if v {
+	for _, d := range m.decisions {
+		if d == decFix {
 			n++
 		}
 	}
 	return n
 }
 
-func fixPrompt(items []findings.Finding, sel map[int]bool) string {
+// fixPrompt builds the instruction for the agent to fix the findings marked
+// decFix. It prepends the repo's own conventions (AGENTS.md / CLAUDE.md) so the
+// fixes follow house style rather than generic defaults.
+func fixPrompt(dir string, items []findings.Finding, decisions map[int]decision) string {
 	var b strings.Builder
-	b.WriteString("Apply fixes for the following code review findings. Edit files directly to fix the root cause, make the smallest change that resolves each, and do not disable or suppress checks.\n\n")
+	if conv := conventions(dir); conv != "" {
+		b.WriteString("Follow this repository's conventions when making changes:\n\n")
+		b.WriteString(conv)
+		b.WriteString("\n\n---\n\n")
+	}
+	b.WriteString("Apply fixes for the following code review findings. Edit files directly to fix the root cause, make the smallest change that resolves each, match the surrounding code style, and do not disable or suppress checks.\n\n")
 	for i, f := range items {
-		if !sel[i] {
+		if decisions[i] != decFix {
 			continue
 		}
 		loc := f.File
@@ -284,6 +337,25 @@ func fixPrompt(items []findings.Finding, sel map[int]bool) string {
 		fmt.Fprintf(&b, "- [%s] %s — %s\n", loc, f.Title, f.Detail)
 	}
 	return b.String()
+}
+
+// conventions reads the repo's contributor-guidance files (if present) so the
+// agent's fixes match house style. Kept short so the prompt stays focused.
+func conventions(dir string) string {
+	const maxEach = 6_000
+	var parts []string
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		text := strings.TrimSpace(string(data))
+		if len(text) > maxEach {
+			text = text[:maxEach] + "\n… [truncated]"
+		}
+		parts = append(parts, "# "+name+"\n"+text)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // --- styling -------------------------------------------------------------
@@ -301,9 +373,9 @@ var (
 			BorderForeground(lipgloss.Color("240")).
 			Padding(0, 1).
 			MarginTop(1)
-	doneIcon    = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("✓")
-	pendIcon    = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("○")
-	failIcon    = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("✗")
+	doneIcon = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("✓")
+	pendIcon = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("○")
+	failIcon = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("✗")
 )
 
 func sevStyle(s findings.Severity) lipgloss.Style {
@@ -315,6 +387,20 @@ func sevStyle(s findings.Severity) lipgloss.Style {
 		color = lipgloss.Color("11")
 	}
 	return lipgloss.NewStyle().Bold(true).Foreground(color)
+}
+
+// decisionGlyph renders a finding's chosen action as a compact marker.
+func decisionGlyph(d decision) string {
+	switch d {
+	case decFix:
+		return selStyle.Render("[fix ]")
+	case decApprove:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("36")).Render("[ok  ]")
+	case decSkip:
+		return dimStyle.Render("[skip]")
+	default:
+		return dimStyle.Render("[    ]")
+	}
 }
 
 func sevLabel(s findings.Severity) string {
@@ -484,8 +570,8 @@ func (m model) findingsBody() string {
 	var b strings.Builder
 	e, w, i := count(m.items)
 	head := titleStyle.Render("Findings") + dimStyle.Render("  "+summary(e, w, i))
-	if n := m.selectedCount(); n > 0 {
-		head += selStyle.Render(fmt.Sprintf("   %d selected", n))
+	if n := m.fixCount(); n > 0 {
+		head += selStyle.Render(fmt.Sprintf("   %d to fix", n))
 	}
 	b.WriteString(head + "\n\n")
 
@@ -494,16 +580,12 @@ func (m model) findingsBody() string {
 		if idx == m.cursor {
 			marker = cursorStyle.Render("> ")
 		}
-		box := "[ ]"
-		if m.selected[idx] {
-			box = selStyle.Render("[x]")
-		}
 		title := f.Title
 		if idx == m.cursor {
 			title = titleStyle.Render(title)
 		}
 		act := actionStyle(f.Action).Render(fmt.Sprintf("%-8s", f.Action))
-		fmt.Fprintf(&b, "%s%s %s %s  %s\n", marker, box, sevStyle(f.Severity).Render(sevLabel(f.Severity)), act, clip(title, m.width-25))
+		fmt.Fprintf(&b, "%s%s %s %s  %s\n", marker, decisionGlyph(m.decisions[idx]), sevStyle(f.Severity).Render(sevLabel(f.Severity)), act, clip(title, m.width-28))
 	}
 
 	sel := m.items[m.cursor]
@@ -517,7 +599,7 @@ func (m model) findingsBody() string {
 	}
 	detail := lipgloss.NewStyle().Width(inner).Render(strings.TrimSpace(sel.Detail))
 	header := sevStyle(sel.Severity).Render(loc) + dimStyle.Render("  ·  ") + actionStyle(sel.Action).Render(string(sel.Action))
-	b.WriteString(boxStyle.Width(inner+2).Render(header+"\n"+detail))
+	b.WriteString(boxStyle.Width(inner + 2).Render(header + "\n" + detail))
 	return b.String()
 }
 
@@ -530,9 +612,9 @@ func (m model) footer() string {
 			return "q quit"
 		}
 		if m.agentCfg != nil {
-			return "j/k move · space select · A all · N none · f fix selected (edits files) · q quit"
+			return "j/k move · f fix · a approve · s skip · A all · N none · enter apply (edits files) · q quit"
 		}
-		return "j/k move · space select · q quit"
+		return "j/k move · f fix · a approve · s skip · q quit"
 	default:
 		return "q quit"
 	}
