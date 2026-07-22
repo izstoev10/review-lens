@@ -40,6 +40,8 @@ func main() {
 		err = cmdRun()
 	case "pr":
 		err = cmdPR()
+	case "loop":
+		err = cmdLoop()
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -60,6 +62,7 @@ Commands:
   init      Write a starter .review-lens.json into the current repo
   run       Gate the current branch (checks -> agent fix -> review -> push -> PR)
   pr [num]  Review an already-open PR's diff, read-only (current branch if no num)
+  loop [num]  Auto-fix loop: review -> fix -> push -> poll CI -> re-review, until green
   help      Show this help`)
 }
 
@@ -148,6 +151,27 @@ func cmdPR() error {
 		number = os.Args[2]
 	}
 	return pipeline.ReviewPR(cwd, number, cfg, os.Stdout, isInteractive())
+}
+
+func cmdLoop() error {
+	path, err := configPath()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	// Optional PR number: `review-lens loop 1234` (current branch's PR if omitted).
+	var number string
+	if len(os.Args) > 2 {
+		number = os.Args[2]
+	}
+	return pipeline.AutoFixLoop(cwd, number, cfg, os.Stdout)
 }
 
 // isInteractive reports whether stdout is a real terminal, so the TUI is only

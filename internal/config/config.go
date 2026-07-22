@@ -44,6 +44,9 @@ type Config struct {
 	Agent *Agent `json:"agent,omitempty"`
 	// MaxAgentAttempts bounds how many fix->recheck cycles gate will run.
 	MaxAgentAttempts int `json:"maxAgentAttempts"`
+	// MaxLoopIterations bounds the `loop` command's review->fix->CI cycles
+	// before it stops for human review. Defaults to 3 when unset.
+	MaxLoopIterations int `json:"maxLoopIterations"`
 	// Review, when true, has the agent review the branch's diff and print
 	// findings just before pushing. Findings are advisory — they do not block
 	// the push (the checks are the gate).
@@ -84,6 +87,7 @@ func Default() Config {
 			"--permission-mode", "acceptEdits",
 		}},
 		MaxAgentAttempts:   2,
+		MaxLoopIterations:  3,
 		Review:             true,
 		BaseBranch:         "main",
 		OpenPR:             true,
