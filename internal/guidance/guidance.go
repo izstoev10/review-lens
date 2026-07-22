@@ -54,6 +54,10 @@ Report only real, actionable problems introduced or exposed by THESE changes:
 // file at relPath (resolved under root); if relPath is empty it uses
 // DefaultPath. A missing or empty file falls back to Default, so callers always
 // get usable guidance.
+//
+// The file may be a SKILL.md with YAML frontmatter
+// the frontmatter is stripped so only the body reaches the review lens
+// prompt.
 func Load(root, relPath string) string {
 	if strings.TrimSpace(relPath) == "" {
 		relPath = DefaultPath
@@ -62,8 +66,27 @@ func Load(root, relPath string) string {
 	if err != nil {
 		return Default
 	}
-	if s := strings.TrimSpace(string(data)); s != "" {
+	if s := strings.TrimSpace(stripFrontmatter(string(data))); s != "" {
 		return s
 	}
 	return Default
+}
+
+// stripFrontmatter removes a leading YAML frontmatter block (a "---" line, up to
+// the next "---" line) if present, returning the remaining body. Files without
+// frontmatter are returned unchanged.
+func stripFrontmatter(s string) string {
+	trimmed := strings.TrimLeft(s, "\uFEFF \t\r\n")
+	if !strings.HasPrefix(trimmed, "---\n") && !strings.HasPrefix(trimmed, "---\r\n") {
+		return s
+	}
+	// Find the closing delimiter after the opening one.
+	rest := trimmed[strings.IndexByte(trimmed, '\n')+1:]
+	for _, delim := range []string{"\n---\n", "\n---\r\n", "\r\n---\r\n"} {
+		if i := strings.Index(rest, delim); i >= 0 {
+			return rest[i+len(delim):]
+		}
+	}
+	// Unterminated frontmatter — leave the content untouched rather than eat it.
+	return s
 }

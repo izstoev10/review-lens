@@ -103,6 +103,13 @@ needed. Delete the file and review-lens falls back to a built-in default. Point
 Only the criteria are editable — the structured JSON findings format is fixed,
 so tuning the guidance can never break how findings are parsed or rendered.
 
+The guidance file can also be a **skill** in the [Matt Pocock skill
+convention](https://github.com/mattpocock/skills) — a `SKILL.md` with YAML
+frontmatter — and review-lens strips the frontmatter before using the body.
+This repo's own review standards live at `skills/code-review/SKILL.md`, and its
+`.review-lens.json` points `reviewGuidancePath` there, so review-lens reviews
+itself with the same skill you can read and edit.
+
 ### Auth / models
 
 `review-lens` never talks to a model directly — it shells out to the CLI in
