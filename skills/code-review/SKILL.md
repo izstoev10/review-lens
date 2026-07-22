@@ -56,6 +56,35 @@ Regardless of what the diff is "about", these are defects wherever they appear:
 - **Backward compatibility** — public APIs, response shapes, and data migrations
   don't break existing consumers.
 
+## Maintainability smells (lowest priority — heuristic)
+
+These are the weakest signals here. Raise one only when the diff *introduces* it
+and it clearly hurts; never let them crowd out the priorities above, and prefer
+saying nothing. Three rules bind them:
+
+- **Repo and tooling override.** A documented repo standard wins; skip anything a
+  linter or formatter already enforces.
+- **Heuristic, never a violation.** Label it as possible ("possible Data
+  Clumps"), cap severity at `warning` (usually `info`), and set action `no-op` or
+  `ask-user` — never `auto-fix`, because the fix is a design choice.
+- **Diff-local only.** Judge only what the change itself shows; do not infer a
+  module's history or reasons-for-change from a single diff.
+
+Match against the changed code (*what it is* → *how to fix*):
+
+- **Mysterious Name** — a name that doesn't reveal what it does or holds. →
+  rename it; if no honest name comes, the design is murky.
+- **Duplicated Code** — the same logic shape in more than one hunk or file of the
+  change. → extract the shared shape, call it from both.
+- **Primitive Obsession** — a primitive or string standing in for a domain
+  concept that deserves its own type. → give the concept its own small type.
+- **Data Clumps** — the same few fields or params keep travelling together. →
+  bundle them into one type, pass that.
+- **Message Chains** — long `a.b().c().d()` navigation the caller shouldn't
+  depend on. → hide the walk behind one method on the first object.
+- **Middle Man** — a class or function that mostly just delegates onward. → cut
+  it, call the real target directly.
+
 ## How to rate severity
 
 - **error** — a defect that will produce wrong behaviour, a crash, data loss, or
