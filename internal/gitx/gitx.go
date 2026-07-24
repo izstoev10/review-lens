@@ -36,6 +36,15 @@ func CurrentBranch(dir string) (string, error) {
 	return run(dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
+// Fetch updates the remote-tracking ref for branch from remote, so a worktree
+// can be based on the branch's latest remote head (e.g. the head of an open PR).
+// It's best-effort: the caller decides how to proceed if the remote is
+// unreachable or the branch doesn't exist there.
+func Fetch(dir, remote, branch string) error {
+	_, err := run(dir, "fetch", remote, branch)
+	return err
+}
+
 // Worktree is a disposable git worktree. Gate runs all checks inside one so the
 // developer's real working directory is never touched — this isolation is the
 // core idea of the tool.
