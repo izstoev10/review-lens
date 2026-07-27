@@ -97,8 +97,13 @@ func (w *Worktree) HasChanges() (bool, error) {
 
 // Diff returns the unstaged+staged diff in the worktree. Useful as context for
 // the agent.
+//
+// The trailing "--" separates revisions from pathspecs: without it, a ref that
+// also names a file/dir in the repo (e.g. a branch "main" alongside a "main/"
+// directory) makes git bail with "ambiguous argument … both revision and
+// filename".
 func (w *Worktree) Diff() (string, error) {
-	return run(w.Path, "diff", "HEAD")
+	return run(w.Path, "diff", "HEAD", "--")
 }
 
 // RefExists reports whether ref (e.g. "main" or "origin/main") resolves in the
@@ -112,7 +117,9 @@ func (w *Worktree) RefExists(ref string) bool {
 // base — i.e. exactly the changes this branch introduces on top of base. This
 // is what a reviewer wants to look at, not unrelated commits already on base.
 func (w *Worktree) DiffSince(base string) (string, error) {
-	return run(w.Path, "diff", "--merge-base", base, "HEAD")
+	// Trailing "--": see Diff. A base branch that also matches a path (e.g. a
+	// "main" branch next to a "main/" directory) is otherwise ambiguous to git.
+	return run(w.Path, "diff", "--merge-base", base, "HEAD", "--")
 }
 
 // ChangedFiles returns the paths this branch changed versus its merge-base with
@@ -120,7 +127,8 @@ func (w *Worktree) DiffSince(base string) (string, error) {
 // aren't handed to a linter). Used to scope checks/fixes to the diff instead of
 // the whole repo — essential on large monorepos.
 func (w *Worktree) ChangedFiles(base string) ([]string, error) {
-	out, err := run(w.Path, "diff", "--name-only", "--merge-base", base, "HEAD")
+	// Trailing "--" disambiguates the base ref from any like-named path (see Diff).
+	out, err := run(w.Path, "diff", "--name-only", "--merge-base", base, "HEAD", "--")
 	if err != nil {
 		return nil, err
 	}
