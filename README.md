@@ -75,7 +75,8 @@ default agent config does); other agents fall back to the plain path.
   "maxAgentAttempts": 2,
   "review": true,
   "baseBranch": "main",
-  "openPR": true
+  "openPR": true,
+  "jiraBaseURL": "https://acme.atlassian.net/browse/"
 }
 ```
 
@@ -88,8 +89,29 @@ default agent config does); other agents fall back to the plain path.
   against **baseBranch** and prints findings. It never blocks the push.
 - **reviewGuidancePath** points to the editable review-criteria file (see below).
   Omit it to use the default location.
+- **openPR** opens a PR with `gh` after a green push (see [PR body](#pr-body)).
+- **jiraBaseURL** (optional) — your Jira "browse" base. Set it to link PRs to
+  tickets (see [PR body](#pr-body)); omit it in non-Jira repos.
 - Fix success is judged by re-running the checks, never by parsing agent output
   — which is why any agent CLI works.
+
+### PR body
+
+When `review-lens run` opens a PR, it builds the body rather than dumping raw
+commits:
+
+- **Repo template** — if the repo has a PR template
+  (`.github/pull_request_template.md`, checked case-insensitively), review-lens
+  uses it as the body. Otherwise it falls back to `gh`'s commit-derived summary.
+- **Jira linking** — with **jiraBaseURL** set, review-lens parses the ticket key
+  from the branch name (`feat/oa-2576-add-limiter` → `OA-2576`), prefixes the PR
+  title with `[OA-2576]`, and adds a clickable `Jira:` link to the top of the
+  body. Unset → no ticket parsing.
+- The [gate signature](#require-review-lens-gate) is always appended.
+
+Body-building happens on **creation**. Re-running `run` on an existing PR only
+back-fills the gate signature — it never overwrites a body or title you've since
+edited.
 
 ### Review guidance (`.review-lens.guidance.md`)
 

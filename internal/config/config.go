@@ -62,6 +62,12 @@ type Config struct {
 	ReviewGuidancePath string `json:"reviewGuidancePath,omitempty"`
 	// OpenPR, when true, runs `gh pr create` after a successful push.
 	OpenPR bool `json:"openPR"`
+	// JiraBaseURL is the Jira "browse" base, e.g.
+	// "https://acme.atlassian.net/browse/". When set, opening a PR parses the
+	// ticket key from the branch name (feat/oa-2576-… → OA-2576), prefixes the PR
+	// title with "[OA-2576]", and adds a clickable "Jira:" link to the body. Empty
+	// disables Jira linking (no key parsing), so non-Jira repos are unaffected.
+	JiraBaseURL string `json:"jiraBaseURL,omitempty"`
 }
 
 // Default returns a language-agnostic starting config with placeholder checks.

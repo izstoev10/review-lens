@@ -89,9 +89,10 @@ func Run(startDir string, cfg config.Config, log io.Writer) error {
 		return fmt.Errorf("push failed: %w", err)
 	}
 
-	// 6. Optionally open a PR via the gh CLI, stamping the gate signature.
+	// 6. Optionally open a PR via the gh CLI, building the body and stamping the
+	//    gate signature.
 	if cfg.OpenPR {
-		if err := openPR(wt.Path, branch, log); err != nil {
+		if err := openPR(wt.Path, branch, cfg.JiraBaseURL, log); err != nil {
 			fmt.Fprintf(log, "review-lens: PR step skipped: %v\n", err)
 		}
 	}
@@ -195,64 +196,103 @@ func showReview(raw string, log io.Writer, interactive bool, dir string, a *conf
 	findings.Render(log, list, true)
 }
 
-// openPR shells out to the GitHub CLI to open a PR for branch, then stamps the
-// gate signature into its body. It's best-effort: if gh isn't installed we bail;
-// if a PR already exists `gh pr create` fails harmlessly and we still ensure the
-// signature is present (so re-running review-lens back-fills an existing PR).
+// openPR shells out to the GitHub CLI to open a PR for branch, then finalizes
+// its title and body. It's best-effort: if gh isn't installed we bail; if a PR
+// already exists `gh pr create` fails harmlessly and finalizePR still runs (so
+// re-running review-lens back-fills the gate signature on an existing PR).
 //
 // The head branch is passed explicitly because the worktree runs with a detached
 // HEAD, so gh can't infer "the current branch".
-func openPR(dir, branch string, log io.Writer) error {
+func openPR(dir, branch, jiraBaseURL string, log io.Writer) error {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return fmt.Errorf("gh not installed")
 	}
 	cmd := exec.Command("gh", "pr", "create", "--fill", "--head", branch)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		// Most commonly: a PR already exists for this branch. Not fatal — we still
-		// stamp the signature below.
-		fmt.Fprintf(log, "review-lens: gh pr create: %s", strings.TrimSpace(string(out)))
-	} else {
+	created := err == nil
+	if created {
 		fmt.Fprintf(log, "review-lens: %s", out)
+	} else {
+		// Most commonly: a PR already exists for this branch. Not fatal — we still
+		// finalize (ensure the signature) below.
+		fmt.Fprintf(log, "review-lens: gh pr create: %s\n", strings.TrimSpace(string(out)))
 	}
-	return stampSignature(dir, branch, log)
+	return finalizePR(dir, branch, jiraBaseURL, created, log)
 }
 
-// stampSignature ensures the open PR for branch carries the gate signature,
-// appending it via `gh pr edit` when missing. Idempotent, so it's safe to run on
-// every `review-lens run`. Uses `gh pr list --head` (not branch inference) so it
-// works from the detached worktree.
-func stampSignature(dir, branch string, log io.Writer) error {
-	list := exec.Command("gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number,body")
+// prInfo is the subset of a PR's metadata we read and rewrite.
+type prInfo struct {
+	Number int    `json:"number"`
+	Body   string `json:"body"`
+	Title  string `json:"title"`
+}
+
+// finalizePR sets the PR's title/body and always ensures the gate signature.
+//
+// On creation it builds the body from the repo's PR template (when present,
+// falling back to gh's commit-derived body) and, if jiraBaseURL is set and a
+// ticket key is parseable from the branch, prefixes the title with "[KEY]" and
+// adds a clickable "Jira:" link to the body. On a re-run against an existing PR
+// (created=false) it only back-fills the signature — never clobbering a body or
+// title a human may have edited.
+func finalizePR(dir, branch, jiraBaseURL string, created bool, log io.Writer) error {
+	pr, err := prForBranch(dir, branch)
+	if err != nil {
+		return err
+	}
+	newTitle, newBody := pr.Title, pr.Body
+
+	if created {
+		if tmpl := findPRTemplate(dir); tmpl != "" {
+			newBody = tmpl
+			fmt.Fprintln(log, "review-lens: using the repo PR template for the body")
+		}
+		if key := jiraKeyFromBranch(branch); key != "" && jiraBaseURL != "" {
+			newBody = withJiraRef(newBody, jiraURL(jiraBaseURL, key))
+			newTitle = withJiraTitlePrefix(newTitle, key)
+			fmt.Fprintf(log, "review-lens: linking Jira ticket %s\n", key)
+		}
+	}
+	newBody, _ = signature.Ensure(newBody)
+
+	args := []string{"pr", "edit", strconv.Itoa(pr.Number)}
+	if newTitle != pr.Title {
+		args = append(args, "--title", newTitle)
+	}
+	if newBody != pr.Body {
+		args = append(args, "--body", newBody)
+	}
+	if len(args) == 3 { // nothing to change
+		fmt.Fprintf(log, "review-lens: PR #%d already up to date\n", pr.Number)
+		return nil
+	}
+	edit := exec.Command("gh", args...)
+	edit.Dir = dir
+	if eout, err := edit.CombinedOutput(); err != nil {
+		return fmt.Errorf("updating PR #%d: %w\n%s", pr.Number, err, eout)
+	}
+	fmt.Fprintf(log, "review-lens: finalized PR #%d\n", pr.Number)
+	return nil
+}
+
+// prForBranch returns the open PR for branch via the gh CLI. Uses --head (not
+// branch inference) so it works from the detached worktree.
+func prForBranch(dir, branch string) (prInfo, error) {
+	list := exec.Command("gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number,body,title")
 	list.Dir = dir
 	out, err := list.Output()
 	if err != nil {
-		return fmt.Errorf("looking up PR to stamp: %w", err)
+		return prInfo{}, fmt.Errorf("looking up PR: %w", err)
 	}
-	var prs []struct {
-		Number int    `json:"number"`
-		Body   string `json:"body"`
-	}
+	var prs []prInfo
 	if err := json.Unmarshal(out, &prs); err != nil {
-		return fmt.Errorf("parsing gh pr list: %w", err)
+		return prInfo{}, fmt.Errorf("parsing gh pr list: %w", err)
 	}
 	if len(prs) == 0 {
-		return fmt.Errorf("no open PR found for branch %q", branch)
+		return prInfo{}, fmt.Errorf("no open PR found for branch %q", branch)
 	}
-	pr := prs[0]
-	newBody, changed := signature.Ensure(pr.Body)
-	if !changed {
-		fmt.Fprintf(log, "review-lens: gate signature already present on PR #%d\n", pr.Number)
-		return nil
-	}
-	edit := exec.Command("gh", "pr", "edit", strconv.Itoa(pr.Number), "--body", newBody)
-	edit.Dir = dir
-	if eout, err := edit.CombinedOutput(); err != nil {
-		return fmt.Errorf("stamping signature: %w\n%s", err, eout)
-	}
-	fmt.Fprintf(log, "review-lens: stamped gate signature into PR #%d\n", pr.Number)
-	return nil
+	return prs[0], nil
 }
 
 func short(sha string) string {
