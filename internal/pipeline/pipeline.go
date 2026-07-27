@@ -24,8 +24,11 @@ import (
 	"github.com/izstoev10/review-lens/internal/tui"
 )
 
-// Run gates the current branch of the repo containing startDir.
-func Run(startDir string, cfg config.Config, log io.Writer) error {
+// Run gates the current branch of the repo containing startDir. When interactive
+// (a real terminal), the review step opens the live findings TUI and any fixes
+// applied there are re-gated and pushed; otherwise the review prints a plain
+// report and the run proceeds unattended.
+func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) error {
 	root, err := gitx.RepoRoot(startDir)
 	if err != nil {
 		return fmt.Errorf("not a git repo: %w", err)
@@ -78,8 +81,31 @@ func Run(startDir string, cfg config.Config, log io.Writer) error {
 		// Guidance is read from the real repo root (not the worktree) so edits
 		// take effect immediately, without needing to be committed first.
 		reviewGuidance := guidance.Load(root, cfg.ReviewGuidancePath)
-		if err := reviewDiff(wt, cfg, branch, reviewGuidance, log); err != nil {
+		if err := reviewDiff(wt, cfg, branch, reviewGuidance, interactive, log); err != nil {
 			fmt.Fprintf(log, "review-lens: review skipped: %v\n", err)
+		}
+	}
+
+	// 4.5 An interactive review may have applied fixes in the worktree. Re-gate
+	//     them — the whole point of `run` is to push only green code — then commit
+	//     so they ride along in the push. A failed re-gate blocks the push.
+	if interactive {
+		if changed, err := wt.HasChanges(); err != nil {
+			return err
+		} else if changed {
+			fmt.Fprintln(log, "review-lens: review applied fixes — re-running checks…")
+			if _, err := checkAndFix(wt, cfg, log); err != nil {
+				return err
+			}
+			if changed, err := wt.HasChanges(); err != nil {
+				return err
+			} else if changed {
+				sha, err := wt.CommitAll("review-lens: apply review fixes")
+				if err != nil {
+					return fmt.Errorf("committing review fixes: %w", err)
+				}
+				fmt.Fprintf(log, "review-lens: committed review fixes (%s)\n", short(sha))
+			}
 		}
 	}
 
@@ -141,10 +167,15 @@ func checkAndFix(wt *gitx.Worktree, cfg config.Config, log io.Writer) (agentRan 
 }
 
 // reviewDiff computes the branch's diff against the base branch and asks the
-// agent to review it, printing findings. Returns an error only if the review
-// couldn't run (e.g. base branch missing) — a review that finds issues is not
-// an error, since findings are advisory.
-func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance string, log io.Writer) error {
+// agent to review it. Returns an error only if the review couldn't run (e.g.
+// base branch missing) — a review that finds issues is not an error, since
+// findings are advisory.
+//
+// When interactive (a real terminal + a streaming agent), it opens the same live
+// TUI as `pr` — activity feed while reviewing, then a navigable findings viewer
+// where fixes can be applied in the worktree. Otherwise it prints the plain
+// colored report.
+func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance string, interactive bool, log io.Writer) error {
 	base := cfg.BaseBranch
 	if base == "" {
 		base = "main"
@@ -165,14 +196,21 @@ func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance str
 		fmt.Fprintf(log, "review-lens: no changes vs %s to review\n", base)
 		return nil
 	}
+	prompt := agent.ReviewPrompt(reviewGuidance, diff)
+
+	// Interactive: the live TUI, run in the worktree so any applied fixes stay
+	// isolated and can be re-gated + pushed by the caller.
+	if interactive && agent.CanStream(cfg.Agent) {
+		fmt.Fprintf(log, "review-lens: reviewing changes vs %s...\n", base)
+		return tui.RunReview(wt.Path, cfg.Agent, prompt, "Reviewing changes vs "+base)
+	}
+
 	fmt.Fprintf(log, "review-lens: reviewing changes vs %s...\n", base)
-	raw, err := agent.Review(wt.Path, cfg.Agent, agent.ReviewPrompt(reviewGuidance, diff), log)
+	raw, err := agent.Review(wt.Path, cfg.Agent, prompt, log)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintln(log)
-	// Inside `run`: plain render, no full-screen TUI mid-pipeline (dir/agent
-	// unused because interactive is false).
 	showReview(raw, log, false, "", nil)
 	return nil
 }

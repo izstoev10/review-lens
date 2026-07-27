@@ -173,7 +173,7 @@ func cmdRun() error {
 	if err != nil {
 		return err
 	}
-	return pipeline.Run(cwd, cfg, os.Stdout)
+	return pipeline.Run(cwd, cfg, isInteractive(), os.Stdout)
 }
 
 func cmdPR() error {
