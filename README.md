@@ -17,7 +17,7 @@ current branch
         └─▶ run checks in order (build, test, lint, …)
               ├─ red ──▶ ask agent to fix ▶ re-run  (up to N attempts)
               └─ green ─▶ AI reviews the diff vs main ▶ print findings
-                          └─▶ push ▶ open PR
+                          └─▶ push ▶ open PR ▶ stamp gate signature
 ```
 
 Checks are the **gate** (red blocks the push). The AI review is **advisory** —
@@ -117,16 +117,47 @@ itself with the same skill you can read and edit.
 in once with your Claude subscription (or set `ANTHROPIC_API_KEY`) and
 review-lens reuses that session. Swap in `codex`, `opencode`, etc. the same way.
 
+## Require review-lens gate
+
+When `review-lens run` opens (or updates) a PR, it stamps a deterministic
+**gate signature** — an HTML comment, invisible in the rendered PR — into the
+PR body:
+
+```
+<!-- review-lens-gate:v1 -->
+```
+
+A GitHub Actions workflow (`.github/workflows/require-review-lens.yml`) then
+fails any PR to `main` whose body lacks that signature, so every human PR is
+provably routed through the gate. Automation is exempt: GitHub Apps
+(`user.type == "Bot"`, e.g. Dependabot) pass automatically, and you can list
+extra automation logins in the workflow's `EXEMPT_AUTHORS`.
+
+**Make it required.** The workflow alone only reports; to actually block merges,
+add it as a required status check:
+
+> GitHub → repo **Settings → Branches → Branch protection rules** → add/edit the
+> rule for `main` → enable **Require status checks to pass before merging** →
+> search for and select **`require review-lens signature`**.
+
+Missing the signature on a PR you opened by hand? Either re-run `review-lens run`
+(it back-fills the signature on the existing PR) or paste the marker above into
+the PR body — the check re-runs on edit.
+
 ## Layout
 
 ```
-main.go                 CLI entrypoint: init | run | help
+main.go                 CLI entrypoint: init | run | pr | loop | help
 internal/config         load/save .review-lens.json  (stdlib only)
 internal/gitx           git wrappers: worktree lifecycle, diff, push
 internal/checks         run configured commands, report pass/fail
 internal/guidance       load editable review criteria (fallback to default)
 internal/agent          build prompt + invoke the agent CLI
-internal/pipeline       orchestrates the whole run
+internal/findings       parse + render structured review findings
+internal/ci             read GitHub CI status via gh (for the auto-fix loop)
+internal/signature      the PR gate signature (stamp + marker)
+internal/tui            interactive review/run terminal UI
+internal/pipeline       orchestrates run / pr / loop
 ```
 
 ## Deliberately not built yet (good next steps)

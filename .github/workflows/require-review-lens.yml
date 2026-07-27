@@ -1,0 +1,54 @@
+name: require-review-lens
+
+# Fail PRs to main whose body lacks the review-lens gate signature, so every
+# human PR is provably routed through the gate. Automation/bots are exempt.
+#
+# Make this a REQUIRED check via branch protection to actually block merges —
+# see the README ("Require review-lens gate").
+
+on:
+  pull_request:
+    # `edited` re-runs the check when someone edits the PR body (e.g. to paste
+    # the signature in), `synchronize` on new pushes.
+    types: [opened, edited, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  signature:
+    name: require review-lens signature
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify the PR body carries the review-lens gate signature
+        env:
+          # Keep this literal in sync with internal/signature/signature.go (Marker).
+          SIGNATURE: "<!-- review-lens-gate:v1 -->"
+          # Passed via env (not interpolated into the script) to avoid injection.
+          PR_BODY: ${{ github.event.pull_request.body }}
+          AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
+          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          # Space-separated logins exempt from the gate (release/dependency bots).
+          # GitHub Apps (user.type == "Bot") are exempt automatically; list any
+          # extra automation accounts here.
+          EXEMPT_AUTHORS: "dependabot[bot] github-actions[bot]"
+        run: |
+          if [ "$AUTHOR_TYPE" = "Bot" ]; then
+            echo "Author '$AUTHOR_LOGIN' is a GitHub App — exempt from the gate."
+            exit 0
+          fi
+          for a in $EXEMPT_AUTHORS; do
+            if [ "$a" = "$AUTHOR_LOGIN" ]; then
+              echo "Author '$AUTHOR_LOGIN' is in the exempt list — skipping the gate."
+              exit 0
+            fi
+          done
+          if printf '%s' "$PR_BODY" | grep -qF -- "$SIGNATURE"; then
+            echo "✓ review-lens gate signature present."
+            exit 0
+          fi
+          echo "::error::This PR is missing the review-lens gate signature."
+          echo "Route it through the gate with 'review-lens run' — it stamps the signature into the PR body when it opens/updates the PR."
+          echo "Expected marker in the PR body: $SIGNATURE"
+          exit 1

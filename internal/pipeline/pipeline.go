@@ -7,9 +7,11 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/izstoev10/review-lens/internal/agent"
@@ -18,6 +20,7 @@ import (
 	"github.com/izstoev10/review-lens/internal/findings"
 	"github.com/izstoev10/review-lens/internal/gitx"
 	"github.com/izstoev10/review-lens/internal/guidance"
+	"github.com/izstoev10/review-lens/internal/signature"
 	"github.com/izstoev10/review-lens/internal/tui"
 )
 
@@ -86,9 +89,9 @@ func Run(startDir string, cfg config.Config, log io.Writer) error {
 		return fmt.Errorf("push failed: %w", err)
 	}
 
-	// 6. Optionally open a PR via the gh CLI.
+	// 6. Optionally open a PR via the gh CLI, stamping the gate signature.
 	if cfg.OpenPR {
-		if err := openPR(wt.Path, log); err != nil {
+		if err := openPR(wt.Path, branch, log); err != nil {
 			fmt.Fprintf(log, "review-lens: PR step skipped: %v\n", err)
 		}
 	}
@@ -192,19 +195,63 @@ func showReview(raw string, log io.Writer, interactive bool, dir string, a *conf
 	findings.Render(log, list, true)
 }
 
-// openPR shells out to the GitHub CLI. It's best-effort: if gh isn't installed
-// or a PR already exists, we just log and move on.
-func openPR(dir string, log io.Writer) error {
+// openPR shells out to the GitHub CLI to open a PR for branch, then stamps the
+// gate signature into its body. It's best-effort: if gh isn't installed we bail;
+// if a PR already exists `gh pr create` fails harmlessly and we still ensure the
+// signature is present (so re-running review-lens back-fills an existing PR).
+//
+// The head branch is passed explicitly because the worktree runs with a detached
+// HEAD, so gh can't infer "the current branch".
+func openPR(dir, branch string, log io.Writer) error {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return fmt.Errorf("gh not installed")
 	}
-	cmd := exec.Command("gh", "pr", "create", "--fill")
+	cmd := exec.Command("gh", "pr", "create", "--fill", "--head", branch)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%w\n%s", err, out)
+		// Most commonly: a PR already exists for this branch. Not fatal — we still
+		// stamp the signature below.
+		fmt.Fprintf(log, "review-lens: gh pr create: %s", strings.TrimSpace(string(out)))
+	} else {
+		fmt.Fprintf(log, "review-lens: %s", out)
 	}
-	fmt.Fprintf(log, "review-lens: %s", out)
+	return stampSignature(dir, branch, log)
+}
+
+// stampSignature ensures the open PR for branch carries the gate signature,
+// appending it via `gh pr edit` when missing. Idempotent, so it's safe to run on
+// every `review-lens run`. Uses `gh pr list --head` (not branch inference) so it
+// works from the detached worktree.
+func stampSignature(dir, branch string, log io.Writer) error {
+	list := exec.Command("gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number,body")
+	list.Dir = dir
+	out, err := list.Output()
+	if err != nil {
+		return fmt.Errorf("looking up PR to stamp: %w", err)
+	}
+	var prs []struct {
+		Number int    `json:"number"`
+		Body   string `json:"body"`
+	}
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return fmt.Errorf("parsing gh pr list: %w", err)
+	}
+	if len(prs) == 0 {
+		return fmt.Errorf("no open PR found for branch %q", branch)
+	}
+	pr := prs[0]
+	newBody, changed := signature.Ensure(pr.Body)
+	if !changed {
+		fmt.Fprintf(log, "review-lens: gate signature already present on PR #%d\n", pr.Number)
+		return nil
+	}
+	edit := exec.Command("gh", "pr", "edit", strconv.Itoa(pr.Number), "--body", newBody)
+	edit.Dir = dir
+	if eout, err := edit.CombinedOutput(); err != nil {
+		return fmt.Errorf("stamping signature: %w\n%s", err, eout)
+	}
+	fmt.Fprintf(log, "review-lens: stamped gate signature into PR #%d\n", pr.Number)
 	return nil
 }
 
