@@ -118,7 +118,7 @@ func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) er
 	// 6. Optionally open a PR via the gh CLI, building the body and stamping the
 	//    gate signature.
 	if cfg.OpenPR {
-		if err := openPR(wt.Path, branch, cfg.JiraBaseURL, log); err != nil {
+		if err := openPR(wt, cfg, branch, log); err != nil {
 			fmt.Fprintf(log, "review-lens: PR step skipped: %v\n", err)
 		}
 	}
@@ -241,12 +241,12 @@ func showReview(raw string, log io.Writer, interactive bool, dir string, a *conf
 //
 // The head branch is passed explicitly because the worktree runs with a detached
 // HEAD, so gh can't infer "the current branch".
-func openPR(dir, branch, jiraBaseURL string, log io.Writer) error {
+func openPR(wt *gitx.Worktree, cfg config.Config, branch string, log io.Writer) error {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return fmt.Errorf("gh not installed")
 	}
 	cmd := exec.Command("gh", "pr", "create", "--fill", "--head", branch)
-	cmd.Dir = dir
+	cmd.Dir = wt.Path
 	out, err := cmd.CombinedOutput()
 	created := err == nil
 	if created {
@@ -256,7 +256,7 @@ func openPR(dir, branch, jiraBaseURL string, log io.Writer) error {
 		// finalize (ensure the signature) below.
 		fmt.Fprintf(log, "review-lens: gh pr create: %s\n", strings.TrimSpace(string(out)))
 	}
-	return finalizePR(dir, branch, jiraBaseURL, created, log)
+	return finalizePR(wt, cfg, branch, created, log)
 }
 
 // prInfo is the subset of a PR's metadata we read and rewrite.
@@ -268,26 +268,36 @@ type prInfo struct {
 
 // finalizePR sets the PR's title/body and always ensures the gate signature.
 //
-// On creation it builds the body from the repo's PR template (when present,
-// falling back to gh's commit-derived body) and, if jiraBaseURL is set and a
-// ticket key is parseable from the branch, prefixes the title with "[KEY]" and
-// adds a clickable "Jira:" link to the body. On a re-run against an existing PR
-// (created=false) it only back-fills the signature — never clobbering a body or
-// title a human may have edited.
-func finalizePR(dir, branch, jiraBaseURL string, created bool, log io.Writer) error {
-	pr, err := prForBranch(dir, branch)
+// On creation it builds the body from the repo's PR template (when present):
+// the agent fills the template in from the branch diff, falling back to the raw
+// template, then to gh's commit-derived body. If jiraBaseURL is set and a ticket
+// key is parseable from the branch, it prefixes the title with "[KEY]" and adds
+// a clickable "Jira:" link. On a re-run against an existing PR (created=false)
+// it only back-fills the signature — never clobbering a body or title a human
+// may have edited.
+func finalizePR(wt *gitx.Worktree, cfg config.Config, branch string, created bool, log io.Writer) error {
+	pr, err := prForBranch(wt.Path, branch)
 	if err != nil {
 		return err
 	}
 	newTitle, newBody := pr.Title, pr.Body
 
 	if created {
-		if tmpl := findPRTemplate(dir); tmpl != "" {
+		if tmpl := findPRTemplate(wt.Path); tmpl != "" {
 			newBody = tmpl
-			fmt.Fprintln(log, "review-lens: using the repo PR template for the body")
+			if cfg.Agent != nil {
+				fmt.Fprintln(log, "review-lens: filling in the PR template from the diff…")
+				if filled, err := fillPRTemplate(wt, cfg, tmpl, log); err != nil {
+					fmt.Fprintf(log, "review-lens: could not fill template (%v); using it as-is\n", err)
+				} else {
+					newBody = filled
+				}
+			} else {
+				fmt.Fprintln(log, "review-lens: using the repo PR template for the body")
+			}
 		}
-		if key := jiraKeyFromBranch(branch); key != "" && jiraBaseURL != "" {
-			newBody = withJiraRef(newBody, jiraURL(jiraBaseURL, key))
+		if key := jiraKeyFromBranch(branch); key != "" && cfg.JiraBaseURL != "" {
+			newBody = withJiraRef(newBody, jiraURL(cfg.JiraBaseURL, key))
 			newTitle = withJiraTitlePrefix(newTitle, key)
 			fmt.Fprintf(log, "review-lens: linking Jira ticket %s\n", key)
 		}
@@ -306,12 +316,42 @@ func finalizePR(dir, branch, jiraBaseURL string, created bool, log io.Writer) er
 		return nil
 	}
 	edit := exec.Command("gh", args...)
-	edit.Dir = dir
+	edit.Dir = wt.Path
 	if eout, err := edit.CombinedOutput(); err != nil {
 		return fmt.Errorf("updating PR #%d: %w\n%s", pr.Number, err, eout)
 	}
 	fmt.Fprintf(log, "review-lens: finalized PR #%d\n", pr.Number)
 	return nil
+}
+
+// fillPRTemplate asks the agent to populate the PR template from the branch's
+// diff against the base branch, returning the filled markdown. Any error
+// (missing base, empty diff, agent failure, empty output) lets the caller fall
+// back to the raw template — filling is best-effort.
+func fillPRTemplate(wt *gitx.Worktree, cfg config.Config, tmpl string, log io.Writer) (string, error) {
+	base := cfg.BaseBranch
+	if base == "" {
+		base = "main"
+	}
+	if !wt.RefExists(base) {
+		return "", fmt.Errorf("base branch %q not found", base)
+	}
+	diff, err := wt.DiffSince(base)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(diff) == "" {
+		return "", fmt.Errorf("no diff vs %s", base)
+	}
+	raw, err := agent.Review(wt.Path, cfg.Agent, agent.PRBodyPrompt(tmpl, diff), log)
+	if err != nil {
+		return "", err
+	}
+	body := stripFences(raw)
+	if body == "" {
+		return "", fmt.Errorf("agent returned an empty body")
+	}
+	return body, nil
 }
 
 // prForBranch returns the open PR for branch via the gh CLI. Uses --head (not

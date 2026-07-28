@@ -58,6 +58,21 @@ func TestWithJiraRef(t *testing.T) {
 	}
 }
 
+func TestStripFences(t *testing.T) {
+	cases := map[string]string{
+		"## Title\n\nbody":                 "## Title\n\nbody", // unfenced, unchanged
+		"```\n## Title\n\nbody\n```":       "## Title\n\nbody", // bare fence
+		"```markdown\n## Title\nbody\n```": "## Title\nbody",   // language-tagged fence
+		"  ```md\n## T\n```  ":             "## T",             // surrounding whitespace
+		"no fence here":                    "no fence here",    // plain
+	}
+	for in, want := range cases {
+		if got := stripFences(in); got != want {
+			t.Errorf("stripFences(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestFindPRTemplate(t *testing.T) {
 	dir := t.TempDir()
 	if got := findPRTemplate(dir); got != "" {

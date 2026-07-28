@@ -67,3 +67,20 @@ func findPRTemplate(dir string) string {
 	}
 	return ""
 }
+
+// stripFences removes a single wrapping ``` code fence from s, if present — some
+// agents wrap their whole answer in one despite being told not to. Content that
+// isn't fenced is returned trimmed but otherwise untouched.
+func stripFences(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	nl := strings.IndexByte(s, '\n')
+	if nl < 0 {
+		return "" // only an opening fence, no content
+	}
+	s = strings.TrimSpace(s[nl+1:])
+	s = strings.TrimSuffix(s, "```")
+	return strings.TrimSpace(s)
+}

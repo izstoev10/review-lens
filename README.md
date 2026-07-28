@@ -100,9 +100,12 @@ default agent config does); other agents fall back to the plain path.
 When `review-lens run` opens a PR, it builds the body rather than dumping raw
 commits:
 
-- **Repo template** — if the repo has a PR template
-  (`.github/pull_request_template.md`, checked case-insensitively), review-lens
-  uses it as the body. Otherwise it falls back to `gh`'s commit-derived summary.
+- **Repo template, filled in** — if the repo has a PR template
+  (`.github/pull_request_template.md`, checked case-insensitively), the agent
+  fills it in from the branch diff (writes the overview, picks a realistic risk
+  level, drops instructional comments) while keeping the template's structure.
+  Falls back to the raw template if the fill step fails, and to `gh`'s
+  commit-derived summary if there's no template or no agent configured.
 - **Jira linking** — with **jiraBaseURL** set, review-lens parses the ticket key
   from the branch name (`feat/oa-2576-add-limiter` → `OA-2576`), prefixes the PR
   title with `[OA-2576]`, and adds a clickable `Jira:` link to the top of the
