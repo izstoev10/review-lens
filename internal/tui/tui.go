@@ -150,6 +150,8 @@ type model struct {
 	fixErr     error
 	fixedCount int
 
+	notice string // transient status line (e.g. "copied"), cleared on next key
+
 	width, height int
 }
 
@@ -245,7 +247,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.phase != phaseDone {
 		return m, nil
 	}
+	m.notice = "" // any key dismisses the previous transient notice
 	switch msg.String() {
+	case "c": // copy the current finding as a prompt to the clipboard
+		if len(m.items) == 0 {
+			return m, nil
+		}
+		if err := clipboardCopy(copyPrompt(m.items[m.cursor])); err != nil {
+			m.notice = "⚠ copy failed: " + err.Error()
+		} else {
+			m.notice = "✓ copied finding as a prompt to the clipboard"
+		}
 	case "j", "down":
 		if m.cursor < len(m.items)-1 {
 			m.cursor++
@@ -573,7 +585,11 @@ func (m model) findingsBody() string {
 	if n := m.fixCount(); n > 0 {
 		head += selStyle.Render(fmt.Sprintf("   %d to fix", n))
 	}
-	b.WriteString(head + "\n\n")
+	b.WriteString(head + "\n")
+	if m.notice != "" {
+		b.WriteString(dimStyle.Render(m.notice) + "\n")
+	}
+	b.WriteString("\n")
 
 	for idx, f := range m.items {
 		marker := "  "
@@ -612,9 +628,11 @@ func (m model) footer() string {
 			return "q quit"
 		}
 		if m.agentCfg != nil {
-			return "j/k move · f fix · a approve · s skip · A all · N none · enter apply (edits files) · q quit"
+			// "f" marks a finding; "enter" applies (runs the agent on) everything
+			// marked — the labels spell out that mark-vs-apply distinction.
+			return "j/k move · f mark fix · a approve · s skip · A all · N none · c copy · enter apply marked (edits files) · q quit"
 		}
-		return "j/k move · f fix · a approve · s skip · q quit"
+		return "j/k move · c copy · q quit"
 	default:
 		return "q quit"
 	}
