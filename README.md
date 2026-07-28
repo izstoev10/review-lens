@@ -52,11 +52,14 @@ In a real terminal, `pr` opens an interactive TUI:
 
 1. **Live view** — a spinner + elapsed timer and a feed of what the agent is
    doing (files read, commands run) while it works.
-2. **Findings viewer** — navigate with `j/k` (and `g/G`). Select findings with
-   `space` (`A` all, `N` none).
-3. **Fix** — press `f` to have the agent fix the selected findings. It edits
-   your working tree directly (review with `git diff`, then commit); nothing is
-   committed or pushed for you.
+2. **Findings viewer** — navigate with `j/k` (and `g/G`). Per finding, **mark**
+   a decision: `f` fix, `a` approve, `s` skip (`A` mark all fix, `N` clear).
+   Press `c` to **copy** the finding as a ready-made prompt to your clipboard —
+   handy for digging into it with an agent in another tab.
+3. **Apply** — press `enter` to run the agent on everything you marked `fix`
+   (marking, then applying — they're distinct). It edits your working tree
+   directly (review with `git diff`, then commit); nothing is committed or
+   pushed for you.
 
 Piped or non-interactive, it prints the plain colour report instead. The live
 view requires an agent that emits Claude's `--output-format stream-json` (the
