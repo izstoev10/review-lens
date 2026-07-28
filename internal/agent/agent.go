@@ -86,6 +86,27 @@ Diff:
 %s`, strings.TrimSpace(reviewGuidance), truncate(diff, maxInput))
 }
 
+// PRBodyPrompt builds the instruction to fill a repo PR template from a diff.
+// The agent must return only the finished markdown body (no fences, no editing
+// files). Same fixed-input truncation as the other prompts.
+func PRBodyPrompt(template, diff string) string {
+	return fmt.Sprintf(`You are writing the description for a pull request, using the repository's PR template.
+
+Fill in the template below based ONLY on the code diff. Rules:
+- Keep the template's headings and overall structure.
+- Replace the instructional HTML comments (<!-- ... -->) with real content; if a comment is only an example or instructions, remove it.
+- Write a concise Overview: what changed and why.
+- If the template asks for a risk level, choose a realistic one from the diff — do not just leave the maximum.
+- For sections you genuinely cannot infer (screenshots, external links), leave them empty or with a short note; do not invent facts.
+- Do NOT modify any files. Output ONLY the finished markdown body — no code fences, no preamble, no closing remarks.
+
+PR template:
+%s
+
+Diff:
+%s`, template, truncate(diff, maxInput))
+}
+
 // CanStream reports whether the configured command emits Claude's stream-json.
 func CanStream(a *config.Agent) bool {
 	if a == nil {
