@@ -75,14 +75,17 @@ func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) er
 		}
 	}
 
-	// 4. Review the committed changes just before pushing. Advisory only —
-	//    findings are printed for the human; they do not block the push.
+	// 4. Review the committed changes just before pushing. Findings themselves are
+	//    advisory (they never block the push), but the review must be able to RUN:
+	//    if it's enabled and can't run (no base branch, agent error), we fail
+	//    closed and refuse to push. Pushing + opening a PR with no review at all
+	//    would defeat the point of the gate.
 	if cfg.Review && cfg.Agent != nil {
 		// Guidance is read from the real repo root (not the worktree) so edits
 		// take effect immediately, without needing to be committed first.
 		reviewGuidance := guidance.Load(root, cfg.ReviewGuidancePath)
 		if err := reviewDiff(wt, cfg, branch, reviewGuidance, interactive, log); err != nil {
-			fmt.Fprintf(log, "review-lens: review skipped: %v\n", err)
+			return fmt.Errorf("review could not run — refusing to push unreviewed: %w", err)
 		}
 	}
 
@@ -175,18 +178,48 @@ func checkAndFix(wt *gitx.Worktree, cfg config.Config, log io.Writer) (agentRan 
 // TUI as `pr` — activity feed while reviewing, then a navigable findings viewer
 // where fixes can be applied in the worktree. Otherwise it prints the plain
 // colored report.
-func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance string, interactive bool, log io.Writer) error {
-	base := cfg.BaseBranch
-	if base == "" {
-		base = "main"
+// resolveBaseBranch finds the branch to diff against. It tries the configured
+// baseBranch (if any), then the common defaults main and master, in both local
+// and remote-tracking (origin/…) forms — so a repo whose default branch is
+// "master" just works, and a fresh clone with only remote-tracking refs does
+// too. It returns an error if none resolve, letting callers fail closed rather
+// than silently skip the review.
+func resolveBaseBranch(wt *gitx.Worktree, cfg config.Config) (string, error) {
+	remote := cfg.Remote
+	if remote == "" {
+		remote = "origin"
 	}
-	// Nothing sensible to diff against if base is missing (e.g. first push of a
-	// brand-new repo, or reviewing the base branch itself).
-	if !wt.RefExists(base) {
-		return fmt.Errorf("base branch %q not found", base)
+	var tried []string
+	seen := map[string]bool{}
+	// Local refs first (configured, then the conventional defaults), then their
+	// remote-tracking counterparts.
+	for _, ref := range []string{
+		cfg.BaseBranch, "main", "master",
+		remote + "/" + cfg.BaseBranch, remote + "/main", remote + "/master",
+	} {
+		if ref == "" || ref == remote+"/" || seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		tried = append(tried, ref)
+		if wt.RefExists(ref) {
+			return ref, nil
+		}
+	}
+	return "", fmt.Errorf("no base branch found (tried %s) — set \"baseBranch\" in .review-lens.json",
+		strings.Join(tried, ", "))
+}
+
+func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance string, interactive bool, log io.Writer) error {
+	base, err := resolveBaseBranch(wt, cfg)
+	if err != nil {
+		return err
 	}
 	if base == branch {
-		return fmt.Errorf("on base branch %q; nothing to review", base)
+		// Running on the base branch itself — nothing to diff. Not an error: the
+		// caller may still legitimately push it (there's just no PR to review).
+		fmt.Fprintf(log, "review-lens: on base branch %q; nothing to review\n", base)
+		return nil
 	}
 	diff, err := wt.DiffSince(base)
 	if err != nil {
@@ -329,12 +362,9 @@ func finalizePR(wt *gitx.Worktree, cfg config.Config, branch string, created boo
 // (missing base, empty diff, agent failure, empty output) lets the caller fall
 // back to the raw template — filling is best-effort.
 func fillPRTemplate(wt *gitx.Worktree, cfg config.Config, tmpl string, log io.Writer) (string, error) {
-	base := cfg.BaseBranch
-	if base == "" {
-		base = "main"
-	}
-	if !wt.RefExists(base) {
-		return "", fmt.Errorf("base branch %q not found", base)
+	base, err := resolveBaseBranch(wt, cfg)
+	if err != nil {
+		return "", err
 	}
 	diff, err := wt.DiffSince(base)
 	if err != nil {
