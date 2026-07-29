@@ -23,10 +23,10 @@ func TestParseActionDefaults(t *testing.T) {
 	// Findings sort by severity (errors first); within a severity the input
 	// order is stable, so index by title to stay robust.
 	want := map[string]Action{
-		"explicit auto-fix":    AutoFix,
-		"explicit no-op":       NoOp,
-		"unrecognised action":  AskUser, // fail closed
-		"missing action":       AskUser, // fail closed
+		"explicit auto-fix":   AutoFix,
+		"explicit no-op":      NoOp,
+		"unrecognised action": AskUser, // fail closed
+		"missing action":      AskUser, // fail closed
 	}
 	for _, f := range list {
 		if got := want[f.Title]; f.Action != got {
