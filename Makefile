@@ -19,10 +19,27 @@ build:
 	@mkdir -p $(BIN_DIR)
 	go build -o $(BIN) .
 
-## install: install review-lens onto your GOPATH/bin
+## install: install review-lens into Go's bin directory and report PATH setup
 .PHONY: install
 install:
 	go install .
+	@go_bin="$$(go env GOBIN)"; \
+	if [ -z "$$go_bin" ]; then \
+		go_path="$$(go env GOPATH)"; \
+		case "$$(go env GOOS)" in \
+			windows) go_bin="$${go_path%%;*}/bin" ;; \
+			*) go_bin="$${go_path%%:*}/bin" ;; \
+		esac; \
+	fi; \
+	printf 'Installed review-lens to %s/review-lens\n' "$$go_bin"; \
+	case ":$$PATH:" in \
+		*":$$go_bin:"*) ;; \
+		*) \
+			printf '\n%s\n' "Go's bin directory is not on your PATH."; \
+			printf '%s\n' "Add this line to your shell profile, then restart your shell:"; \
+			printf '  export PATH="%s:$$PATH"\n' "$$go_bin"; \
+			;; \
+	esac
 
 ## run: run the CLI (pass args via ARGS, e.g. `make run ARGS="pr 123"`)
 .PHONY: run
