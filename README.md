@@ -29,8 +29,15 @@ never touched; everything runs in the throwaway worktree.
 ```sh
 go install github.com/izstoev10/review-lens@latest   # once it's on GitHub
 # or, locally:
-go build -o review-lens . && mv review-lens ~/bin/    # anywhere on your PATH
+make install
 ```
+
+Go installs the command into `GOBIN`, or the `bin` directory of the first
+`GOPATH` entry when `GOBIN` is unset. `make install` prints the exact
+destination. If that directory is not on your `PATH`, it also prints the
+`export PATH=...` line to add to your shell profile (such as `~/.bash_profile`
+or `~/.zshrc`). Restart the shell afterward; then `review-lens` can be run from
+any directory.
 
 ## Local development
 
@@ -48,7 +55,7 @@ make build            # → ./bin/review-lens
 ./bin/review-lens help
 
 # or put it on your PATH:
-make install          # → $(go env GOPATH)/bin/review-lens
+make install          # prints the destination and any required PATH setup
 ```
 
 Try it against a repo by building, then running the binary from inside that repo
