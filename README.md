@@ -32,6 +32,42 @@ go install github.com/izstoev10/review-lens@latest   # once it's on GitHub
 go build -o review-lens . && mv review-lens ~/bin/    # anywhere on your PATH
 ```
 
+## Local development
+
+**Prerequisites**
+
+- **Go 1.26+** (see `go.mod`) and **git**.
+- **[GitHub CLI](https://cli.github.com/) (`gh`)**, authenticated (`gh auth login`) — needed for `pr`, `loop`, and PR creation in `run`.
+- An **agent CLI** (e.g. [Claude Code](https://claude.com/claude-code), `claude`) if you want the fix/review steps. Optional: without one, review-lens just reports.
+
+**Clone, build, run**
+
+```sh
+git clone https://github.com/izstoev10/review-lens && cd review-lens
+make build            # → ./bin/review-lens
+./bin/review-lens help
+
+# or put it on your PATH:
+make install          # → $(go env GOPATH)/bin/review-lens
+```
+
+Try it against a repo by building, then running the binary from inside that repo
+(`cd your-repo && /path/to/review-lens init`). `make run ARGS="pr 123"` runs the
+CLI straight from source.
+
+**Test & checks**
+
+```sh
+make test             # go test ./...
+make check            # gofmt-diff + go vet (changes nothing; good before pushing)
+make fmt              # gofmt -w . (apply formatting)
+make ci               # what GitHub CI runs: vet → build → test
+```
+
+Run `make` (or `make help`) to list every target. review-lens is self-hosted: PRs
+to `main` must carry the gate signature (see [Require review-lens gate](#require-review-lens-gate)),
+which `review-lens run` stamps for you.
+
 ## Use
 
 ```sh

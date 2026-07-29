@@ -1,5 +1,6 @@
 # Binaries
 /review-lens
+/bin/
 *.exe
 
 # Local editor / OS cruft
