@@ -17,6 +17,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/charmbracelet/lipgloss"
@@ -25,6 +26,7 @@ import (
 	"github.com/izstoev10/review-lens/internal/gitx"
 	"github.com/izstoev10/review-lens/internal/guidance"
 	"github.com/izstoev10/review-lens/internal/pipeline"
+	"github.com/izstoev10/review-lens/internal/setup"
 )
 
 const configName = ".review-lens.json"
@@ -96,6 +98,10 @@ func cmdInit() error {
 		_, err := os.Stat(filepath.Join(root, name))
 		return err == nil
 	})
+	cfg.Agent, err = setup.SelectAgent(os.Stdin, os.Stdout, isInitInteractive(), exec.LookPath)
+	if err != nil {
+		return err
+	}
 	if err := config.Save(path, cfg); err != nil {
 		return err
 	}
@@ -226,4 +232,14 @@ func isInteractive() bool {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// isInitInteractive requires both ends of the setup prompt to be terminals so
+// redirected or automated init commands never block waiting for input.
+func isInitInteractive() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0 && isInteractive()
 }

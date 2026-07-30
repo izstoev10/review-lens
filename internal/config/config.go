@@ -87,11 +87,7 @@ func Default() Config {
 		// --include-partial-messages streams thinking/text token-by-token, so the
 		// live feed updates continuously instead of only when a (possibly very
 		// long) thinking block finishes.
-		Agent: &Agent{Cmd: []string{
-			"claude", "-p",
-			"--output-format", "stream-json", "--verbose", "--include-partial-messages",
-			"--permission-mode", "acceptEdits",
-		}},
+		Agent:              ClaudeAgent(),
 		MaxAgentAttempts:   2,
 		MaxLoopIterations:  3,
 		Review:             true,
@@ -99,6 +95,25 @@ func Default() Config {
 		OpenPR:             true,
 		ReviewGuidancePath: guidance.DefaultPath,
 	}
+}
+
+// ClaudeAgent returns the non-interactive Claude Code configuration used by
+// init when Claude is selected.
+func ClaudeAgent() *Agent {
+	return &Agent{Cmd: []string{
+		"claude", "-p",
+		"--output-format", "stream-json", "--verbose", "--include-partial-messages",
+		"--permission-mode", "acceptEdits",
+	}}
+}
+
+// CodexAgent returns a non-interactive Codex configuration that can edit the
+// disposable worktree without pausing for an approval prompt.
+func CodexAgent() *Agent {
+	return &Agent{Cmd: []string{
+		"codex", "--ask-for-approval", "never",
+		"exec", "--sandbox", "workspace-write",
+	}}
 }
 
 // Detect inspects the repo root for well-known project markers and returns a
