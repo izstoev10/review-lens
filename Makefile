@@ -4,6 +4,9 @@ BINARY  := review-lens
 BIN_DIR := bin
 BIN     := $(BIN_DIR)/$(BINARY)
 PKGS    := ./...
+PREFIX  ?= $(HOME)/.local
+INSTALL_BIN_DIR ?= $(PREFIX)/bin
+INSTALLED_BIN   := $(INSTALL_BIN_DIR)/$(BINARY)
 
 .DEFAULT_GOAL := help
 
@@ -19,25 +22,18 @@ build:
 	@mkdir -p $(BIN_DIR)
 	go build -o $(BIN) .
 
-## install: install review-lens into Go's bin directory and report PATH setup
+## install: install review-lens for the current user (override PREFIX if needed)
 .PHONY: install
-install:
-	go install .
-	@go_bin="$$(go env GOBIN)"; \
-	if [ -z "$$go_bin" ]; then \
-		go_path="$$(go env GOPATH)"; \
-		case "$$(go env GOOS)" in \
-			windows) go_bin="$${go_path%%;*}/bin" ;; \
-			*) go_bin="$${go_path%%:*}/bin" ;; \
-		esac; \
-	fi; \
-	printf 'Installed review-lens to %s/review-lens\n' "$$go_bin"; \
+install: build
+	@mkdir -p "$(INSTALL_BIN_DIR)"
+	install -m 0755 "$(BIN)" "$(INSTALLED_BIN)"
+	@printf 'Installed review-lens to %s\n' "$(INSTALLED_BIN)"; \
 	case ":$$PATH:" in \
-		*":$$go_bin:"*) ;; \
+		*":$(INSTALL_BIN_DIR):"*) ;; \
 		*) \
-			printf '\n%s\n' "Go's bin directory is not on your PATH."; \
+			printf '\n%s\n' "$(INSTALL_BIN_DIR) is not on your PATH."; \
 			printf '%s\n' "Add this line to your shell profile, then restart your shell:"; \
-			printf '  export PATH="%s:$$PATH"\n' "$$go_bin"; \
+			printf '  export PATH="%s:$$PATH"\n' "$(INSTALL_BIN_DIR)"; \
 			;; \
 	esac
 
