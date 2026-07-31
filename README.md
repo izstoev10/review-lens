@@ -27,17 +27,18 @@ never touched; everything runs in the throwaway worktree.
 ## Install
 
 ```sh
-go install github.com/izstoev10/review-lens@latest   # once it's on GitHub
+GOBIN="$HOME/.local/bin" go install github.com/izstoev10/review-lens@latest
 # or, locally:
 make install
 ```
 
-Go installs the command into `GOBIN`, or the `bin` directory of the first
-`GOPATH` entry when `GOBIN` is unset. `make install` prints the exact
-destination. If that directory is not on your `PATH`, it also prints the
-`export PATH=...` line to add to your shell profile (such as `~/.bash_profile`
-or `~/.zshrc`). Restart the shell afterward; then `review-lens` can be run from
-any directory.
+Both commands install to `~/.local/bin/review-lens` by default, making the CLI
+available to the current user outside this repository. If `~/.local/bin` is not
+on your `PATH`, `make install` prints the exact `export PATH=...` line to add to
+your shell profile (such as `~/.bash_profile` or `~/.zshrc`). Restart the shell
+afterward.
+
+To choose another local install prefix, run `make install PREFIX=/some/path`.
 
 ## Local development
 
@@ -55,7 +56,7 @@ make build            # → ./bin/review-lens
 ./bin/review-lens help
 
 # or put it on your PATH:
-make install          # prints the destination and any required PATH setup
+make install          # → ~/.local/bin/review-lens
 ```
 
 Try it against a repo by building, then running the binary from inside that repo
