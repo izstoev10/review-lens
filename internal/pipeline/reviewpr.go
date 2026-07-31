@@ -53,7 +53,7 @@ func ReviewPR(dir, number string, cfg config.Config, log io.Writer, interactive 
 	// TUI (activity while it works, then findings). Otherwise fall back to a
 	// plain run: capture output, then render (static TUI if interactive).
 	if interactive && agent.CanStream(cfg.Agent) {
-		return tui.RunReview(dir, cfg.Agent, prompt, "Reviewing "+target)
+		return tui.RunReview(dir, cfg.Agent, prompt, "Reviewing "+target, tui.DestWorkingTree)
 	}
 
 	fmt.Fprintf(log, "review-lens: reviewing %s...\n", target)

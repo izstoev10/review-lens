@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -124,24 +125,44 @@ func CanStream(a *config.Agent) bool {
 // action as it happens. May be nil.
 type onActivity func(string)
 
+// ErrCanceled reports that the caller cancelled the run through its context,
+// as opposed to the agent failing or timing out. Callers that cancel on purpose
+// (the TUI, when you quit mid-fix) use this to tell "you stopped it" apart from
+// "it broke".
+var ErrCanceled = errors.New("agent canceled")
+
 // exec runs the agent with prompt appended, inside dir. If the command streams
 // JSON it is parsed for activity + final text; otherwise the raw combined
 // output is returned as the text. activity (if non-nil) is called per event.
-func execAgent(dir string, a *config.Agent, prompt string, activity onActivity) (string, error) {
+//
+// Cancelling parent kills the agent process and makes execAgent return once it
+// has actually exited — so a caller that cancels can rely on no further file
+// writes happening after the call returns. cancellable callers additionally get
+// process-group isolation; see isolateForCancel.
+func execAgent(parent context.Context, dir string, a *config.Agent, prompt string, activity onActivity, cancellable bool) (string, error) {
 	if a == nil || len(a.Cmd) == 0 {
 		return "", fmt.Errorf("no agent configured")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	args := append(append([]string{}, a.Cmd[1:]...), prompt)
 	// #nosec G204 — agent command comes from the user's own config, by design.
 	cmd := exec.CommandContext(ctx, a.Cmd[0], args...)
 	cmd.Dir = dir
+	if cancellable {
+		isolateForCancel(cmd)
+		// Backstop: if something escapes the process group and holds our pipes
+		// open, don't let Wait hang the caller forever.
+		cmd.WaitDelay = 2 * time.Second
+	}
 
 	if !CanStream(a) {
 		out, err := cmd.CombinedOutput()
 		if err != nil {
+			if parent.Err() != nil {
+				return string(out), ErrCanceled
+			}
 			return string(out), fmt.Errorf("agent %q failed: %w", a.Cmd[0], err)
 		}
 		return strings.TrimSpace(string(out)), nil
@@ -159,7 +180,12 @@ func execAgent(dir string, a *config.Agent, prompt string, activity onActivity) 
 
 	result := parseStream(stdout, activity)
 
+	// Wait reaps the process, so once it returns the agent can no longer write
+	// files — which is what makes cancellation safe for the caller.
 	waitErr := cmd.Wait()
+	if parent.Err() != nil {
+		return result, ErrCanceled
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return result, fmt.Errorf("agent %q timed out after %s", a.Cmd[0], timeout)
 	}
@@ -343,29 +369,33 @@ func snippet(s string) string {
 
 // Fix runs the agent to fix a failing check, streaming activity to progress.
 func Fix(dir string, a *config.Agent, prompt string, progress io.Writer) error {
-	_, err := execAgent(dir, a, prompt, func(act string) {
+	_, err := execAgent(context.Background(), dir, a, prompt, func(act string) {
 		fmt.Fprintf(progress, "review-lens:   → %s\n", act)
-	})
+	}, false)
 	return err
 }
 
 // Review runs the agent read-only and returns its final text. Activity (if any)
 // is written to status so a long run shows progress.
 func Review(dir string, a *config.Agent, prompt string, status io.Writer) (string, error) {
-	return execAgent(dir, a, prompt, func(act string) {
+	return execAgent(context.Background(), dir, a, prompt, func(act string) {
 		fmt.Fprintf(status, "review-lens:   → %s\n", act)
-	})
+	}, false)
 }
 
 // StreamReview runs the agent read-only, calling activity for each action as it
-// happens (for a live UI), and returns the final text. Used by the TUI.
-func StreamReview(dir string, a *config.Agent, prompt string, activity func(string)) (string, error) {
-	return execAgent(dir, a, prompt, activity)
+// happens (for a live UI), and returns the final text. Used by the TUI, which
+// cancels ctx to stop the agent when you quit mid-run.
+func StreamReview(ctx context.Context, dir string, a *config.Agent, prompt string, activity func(string)) (string, error) {
+	return execAgent(ctx, dir, a, prompt, activity, true)
 }
 
 // StreamFix runs the agent to apply fixes, streaming activity to the callback.
 // Same mechanism as StreamReview; the difference is only the prompt (which asks
 // the agent to edit files) and that the caller doesn't parse the result.
-func StreamFix(dir string, a *config.Agent, prompt string, activity func(string)) (string, error) {
-	return execAgent(dir, a, prompt, activity)
+//
+// Because this one edits files, cancelling ctx matters: it returns only after
+// the agent process has exited, so the caller knows the tree has settled.
+func StreamFix(ctx context.Context, dir string, a *config.Agent, prompt string, activity func(string)) (string, error) {
+	return execAgent(ctx, dir, a, prompt, activity, true)
 }
