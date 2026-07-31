@@ -31,6 +31,94 @@ func pathLookup(installed ...string) func(string) (string, error) {
 	}
 }
 
+func agentNames(options []agentOption) []string {
+	names := make([]string, 0, len(options))
+	for _, option := range options {
+		names = append(names, option.name)
+	}
+	return names
+}
+
+func TestInstalledAgentsKeepsPreferenceOrder(t *testing.T) {
+	// Installed in the opposite order to agentOptions: preference, not PATH
+	// order, decides the menu.
+	got := agentNames(installedAgents(pathLookup("codex", "claude")))
+
+	want := []string{"Claude Code", "Codex"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestInstalledAgentsSkipsMissingBinaries(t *testing.T) {
+	got := agentNames(installedAgents(pathLookup("codex")))
+
+	want := []string{"Codex"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestInstalledAgentsWithEmptyPath(t *testing.T) {
+	if got := installedAgents(pathLookup()); len(got) != 0 {
+		t.Fatalf("got %q, want no agents", agentNames(got))
+	}
+}
+
+func TestParseAgentChoice(t *testing.T) {
+	// noneChoice of 3 models two installed agents plus None.
+	const noneChoice = 3
+
+	tests := []struct {
+		name   string
+		answer string
+		want   int
+		wantOK bool
+	}{
+		{name: "blank takes the default", answer: "", want: defaultChoice, wantOK: true},
+		{name: "whitespace takes the default", answer: "  \t ", want: defaultChoice, wantOK: true},
+		{name: "first agent", answer: "1", want: 1, wantOK: true},
+		{name: "second agent", answer: "2", want: 2, wantOK: true},
+		{name: "none", answer: "3", want: noneChoice, wantOK: true},
+		{name: "surrounding whitespace is trimmed", answer: " 2 ", want: 2, wantOK: true},
+		{name: "zero is below range", answer: "0"},
+		{name: "negative is below range", answer: "-1"},
+		{name: "past none is above range", answer: "4"},
+		{name: "not a number", answer: "codex"},
+		{name: "trailing garbage", answer: "2x"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := parseAgentChoice(test.answer, noneChoice)
+			if ok != test.wantOK {
+				t.Fatalf("parseAgentChoice(%q) ok = %t, want %t", test.answer, ok, test.wantOK)
+			}
+			if got != test.want {
+				t.Fatalf("parseAgentChoice(%q) = %d, want %d", test.answer, got, test.want)
+			}
+		})
+	}
+}
+
+func TestAgentForChoiceResolvesInstalledAgent(t *testing.T) {
+	installed := installedAgents(pathLookup("claude", "codex"))
+
+	agent := agentForChoice(installed, 2)
+	if agent == nil {
+		t.Fatal("got nil agent, want Codex")
+	}
+	requireCodexAgent(t, agent.Cmd)
+}
+
+func TestAgentForChoiceNoneYieldsNoAgent(t *testing.T) {
+	installed := installedAgents(pathLookup("claude", "codex"))
+
+	if agent := agentForChoice(installed, len(installed)+1); agent != nil {
+		t.Fatalf("got agent %#v, want nil", agent)
+	}
+}
+
 func TestSelectAgentInteractiveDefaultsToOnlyInstalledAgent(t *testing.T) {
 	var out bytes.Buffer
 
