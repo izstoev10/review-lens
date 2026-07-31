@@ -88,6 +88,11 @@ review-lens pr        # review the current branch's OPEN PR, read-only
 review-lens pr 1234   # review a specific PR by number
 ```
 
+When run in a terminal, `init` detects installed agent CLIs and asks which one
+to use for fixes and reviews. Claude Code and Codex are supported directly; you
+can also choose no agent. In non-interactive use, `init` selects the first
+supported CLI it finds and configures no agent when neither is installed.
+
 `pr` is the safe, read-only path: it pulls the PR diff via `gh pr diff`, has the
 agent review it, and shows findings. Nothing is committed, pushed, or edited —
 ideal when the branch is already pushed and the PR exists.
@@ -118,7 +123,7 @@ default agent config does); other agents fall back to the plain path.
     { "name": "build", "cmd": ["go", "build", "./..."] },
     { "name": "test",  "cmd": ["go", "test", "./..."] }
   ],
-  "agent": { "cmd": ["claude", "-p"] },
+  "agent": { "cmd": ["codex", "--ask-for-approval", "never", "exec", "--sandbox", "workspace-write"] },
   "maxAgentAttempts": 2,
   "review": true,
   "baseBranch": "main",
@@ -189,9 +194,9 @@ itself with the same skill you can read and edit.
 ### Auth / models
 
 `review-lens` never talks to a model directly — it shells out to the CLI in
-`agent.cmd`. Authentication lives in that CLI. For `claude` (Claude Code), log
-in once with your Claude subscription (or set `ANTHROPIC_API_KEY`) and
-review-lens reuses that session. Swap in `codex`, `opencode`, etc. the same way.
+`agent.cmd`. Authentication lives in that CLI. Log in once through the agent
+you selected (for example, `codex login` or Claude Code's login flow), and
+review-lens reuses that session. You can edit `agent.cmd` to use another CLI.
 
 ## Require review-lens gate
 
