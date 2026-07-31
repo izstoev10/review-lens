@@ -94,8 +94,7 @@ func RunReview(dir string, a *config.Agent, prompt, title string, dest Dest) err
 		result, err := agent.StreamReview(ctx, dir, a, prompt, func(act string) { emitActivity(ch, act) })
 		ch <- doneMsg{result: result, err: err}
 	}()
-	_, err := p.Run()
-	return err
+	return run(p)
 }
 
 // Show displays already-computed findings (no live review phase).
@@ -111,8 +110,18 @@ func Show(items []findings.Finding, dir string, a *config.Agent, dest Dest) erro
 	m.items = items
 	m.decisions = defaultDecisions(items)
 	m.stages = []stage{{"Review", stageDone}, {"Findings", stageDone}}
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	_, err := p.Run()
+	return run(tea.NewProgram(m, tea.WithAltScreen()))
+}
+
+// run drives the program and, once the alt screen is gone, prints whatever the
+// UI had to say but never got to show. Quitting mid-apply skips the viewer, so
+// without this a session in which the agent edited the user's files ends with a
+// blank terminal and no hint that anything changed.
+func run(p *tea.Program) error {
+	final, err := p.Run()
+	if m, ok := final.(model); ok && m.exitNote != "" {
+		fmt.Println(m.exitNote)
+	}
 	return err
 }
 
@@ -229,6 +238,7 @@ type model struct {
 	fixSummary string // outcome banner from the last apply; survives keypresses
 	fixFailed  bool
 	fixErr     error
+	exitNote   string // outcome the viewer never got to show; printed after the UI exits
 
 	// Cancelling agentCtx kills the running agent. quitting records that the user
 	// asked to leave mid-run: we hold the quit until the agent has actually
@@ -328,6 +338,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fixSummary, m.fixFailed = fixOutcome(len(m.applying), m.dest, msg.err)
 		m.applying = nil
 		if m.quitting {
+			// The viewer that would render this banner is never drawn — carry it
+			// out so the agent's edits aren't reported by an empty screen.
+			m.exitNote = m.fixSummary
 			return m, tea.Quit
 		}
 		return m, waitFor(m.events)

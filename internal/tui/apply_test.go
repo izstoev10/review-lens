@@ -2,10 +2,12 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/izstoev10/review-lens/internal/agent"
 	"github.com/izstoev10/review-lens/internal/config"
 	"github.com/izstoev10/review-lens/internal/findings"
 )
@@ -126,6 +128,24 @@ func TestQuitDuringApplyWaitsForTheAgent(t *testing.T) {
 	}
 	if !next.(model).applied[0] {
 		t.Error("edits the agent completed before stopping should still be recorded")
+	}
+}
+
+// Quitting mid-apply tears down the alt screen without ever drawing the viewer,
+// so the outcome has to survive the exit: on the `pr` path the agent has just
+// edited the user's own files, and a silent exit hides that entirely.
+func TestQuitDuringApplyReportsWhatTheAgentDid(t *testing.T) {
+	m := fixingModel(t)
+	m.dest = DestWorkingTree
+	m.quitting = true
+
+	next, _ := m.Update(fixDoneMsg{err: agent.ErrCanceled})
+	note := next.(model).exitNote
+	if note == "" {
+		t.Fatal("quitting mid-apply left nothing to print — the edits go unreported")
+	}
+	if !strings.Contains(note, "kept") {
+		t.Errorf("exitNote = %q, want it to say the agent's edits are kept", note)
 	}
 }
 
