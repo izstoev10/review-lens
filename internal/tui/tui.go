@@ -8,10 +8,14 @@
 //
 // The UI has a checkpoint pipeline (stages ticked off as they complete) above a
 // body that changes with the phase: a live activity feed while the agent works,
-// then a navigable findings viewer, then a fix summary.
+// then a navigable findings viewer. Applying fixes returns to that viewer with
+// the fixed findings marked, so a session can work through a review in several
+// passes rather than ending at the first apply.
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,32 +49,79 @@ func waitFor(ch <-chan tea.Msg) tea.Cmd {
 	return func() tea.Msg { return <-ch }
 }
 
+// emitActivity delivers an activity line without ever blocking the agent
+// goroutine. If the UI is behind, the line is dropped — a stalled send would
+// also stall the goroutine's final done message, which the quit handshake waits
+// on before letting the agent's files be touched by anyone else.
+func emitActivity(ch chan tea.Msg, act string) {
+	select {
+	case ch <- activityMsg(act):
+	default:
+	}
+}
+
+// --- fix destination -----------------------------------------------------
+
+// Dest says where the agent's fixes land, which is the difference between
+// "go and commit these" and "review-lens will take it from here".
+type Dest int
+
+const (
+	// DestWorkingTree: the agent edits the user's own working tree, and it's on
+	// them to review and commit the result. This is the `pr` path.
+	DestWorkingTree Dest = iota
+	// DestWorktree: the agent edits review-lens's disposable worktree. The user's
+	// working tree is untouched; the caller re-runs the checks over the fixes and
+	// includes them in the push. This is the `run` path.
+	DestWorktree
+)
+
 // --- entry points --------------------------------------------------------
 
-// RunReview streams a review live, then shows selectable findings.
-func RunReview(dir string, a *config.Agent, prompt, title string) error {
+// RunReview streams a review live, then shows selectable findings. dest tells
+// the viewer where any applied fixes end up, so it can say what happens next.
+func RunReview(dir string, a *config.Agent, prompt, title string, dest Dest) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	ch := make(chan tea.Msg, 128)
 	m := newModel(title, dir, a, ch)
+	m.dest = dest
+	m.agentCtx, m.cancelAgent = ctx, cancel
 	m.stages = []stage{{"Fetch diff", stageDone}, {"Review", stageRunning}, {"Findings", stagePending}}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	go func() {
-		result, err := agent.StreamReview(dir, a, prompt, func(act string) { ch <- activityMsg(act) })
+		result, err := agent.StreamReview(ctx, dir, a, prompt, func(act string) { emitActivity(ch, act) })
 		ch <- doneMsg{result: result, err: err}
 	}()
-	_, err := p.Run()
-	return err
+	return run(p)
 }
 
 // Show displays already-computed findings (no live review phase).
-func Show(items []findings.Finding, dir string, a *config.Agent) error {
+func Show(items []findings.Finding, dir string, a *config.Agent, dest Dest) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	ch := make(chan tea.Msg, 128)
 	m := newModel("", dir, a, ch)
+	m.dest = dest
+	m.agentCtx, m.cancelAgent = ctx, cancel
 	m.phase = phaseDone
 	m.items = items
 	m.decisions = defaultDecisions(items)
 	m.stages = []stage{{"Review", stageDone}, {"Findings", stageDone}}
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	_, err := p.Run()
+	return run(tea.NewProgram(m, tea.WithAltScreen()))
+}
+
+// run drives the program and, once the alt screen is gone, prints whatever the
+// UI had to say but never got to show. Quitting mid-apply skips the viewer, so
+// without this a session in which the agent edited the user's files ends with a
+// blank terminal and no hint that anything changed.
+func run(p *tea.Program) error {
+	final, err := p.Run()
+	if m, ok := final.(model); ok && m.exitNote != "" {
+		fmt.Println(m.exitNote)
+	}
 	return err
 }
 
@@ -78,11 +129,12 @@ func Show(items []findings.Finding, dir string, a *config.Agent) error {
 
 type phase int
 
+// The viewer is the resting state: both the review and any fix run return to
+// phaseDone, so applying fixes is a step in a session rather than the end of it.
 const (
-	phaseRunning phase = iota
-	phaseDone
-	phaseFixing
-	phaseFixed
+	phaseRunning phase = iota // the review agent is working
+	phaseDone                 // the findings viewer
+	phaseFixing               // the fix agent is working
 )
 
 type stageStatus int
@@ -127,6 +179,39 @@ func defaultDecisions(items []findings.Finding) map[int]decision {
 	return d
 }
 
+// pendingFixes lists the indices the next apply should send to the agent:
+// marked to fix, and not already applied in an earlier pass. Keeping this one
+// function as the single answer means the "n to fix" counter, the prompt, and
+// the enabled/disabled apply action can never disagree.
+func pendingFixes(items []findings.Finding, decisions map[int]decision, applied map[int]bool) []int {
+	var idx []int
+	for i := range items {
+		if decisions[i] == decFix && !applied[i] {
+			idx = append(idx, i)
+		}
+	}
+	return idx
+}
+
+// fixOutcome is the banner shown after an apply: what happened, and what the
+// user is expected to do about it. The advice hinges on dest — in a `run` the
+// fixes are in a throwaway worktree that review-lens re-gates and pushes, so
+// telling the user to `git diff` would point them at an unchanged tree.
+func fixOutcome(n int, dest Dest, err error) (text string, failed bool) {
+	switch {
+	case errors.Is(err, agent.ErrCanceled):
+		return "Apply canceled — the agent was stopped; any edits it had already made are kept.", true
+	case err != nil:
+		return "Apply failed: " + err.Error(), true
+	}
+	done := fmt.Sprintf("✓ Applied fixes for %s.", plural(n, "finding"))
+	if dest == DestWorktree {
+		return done + " They stay in review-lens's worktree — your own files are untouched; " +
+			"the checks re-run over them and they ride along in the push.", false
+	}
+	return done + " Files in your working tree were edited — review with `git diff`, then commit.", false
+}
+
 type model struct {
 	title    string
 	dir      string
@@ -142,13 +227,26 @@ type model struct {
 	activities []string
 
 	items     []findings.Finding
-	decisions map[int]decision // per-finding: fix / approve / skip / pending
+	decisions map[int]decision // per-finding: what the user chose
+	applied   map[int]bool     // per-finding: the agent has already fixed it
+	applying  []int            // indices in the in-flight apply, promoted to applied on success
 	cursor    int
 	rawText   string
 	err       error
 
+	dest       Dest
+	fixSummary string // outcome banner from the last apply; survives keypresses
+	fixFailed  bool
 	fixErr     error
-	fixedCount int
+	exitNote   string // outcome the viewer never got to show; printed after the UI exits
+
+	// Cancelling agentCtx kills the running agent. quitting records that the user
+	// asked to leave mid-run: we hold the quit until the agent has actually
+	// exited, so nothing is still writing files when RunReview returns and the
+	// caller starts re-checking and committing them.
+	agentCtx    context.Context
+	cancelAgent context.CancelFunc
+	quitting    bool
 
 	notice string // transient status line (e.g. "copied"), cleared on next key
 
@@ -167,12 +265,16 @@ func newModel(title, dir string, a *config.Agent, ch chan tea.Msg) model {
 		phase:     phaseRunning,
 		spinner:   s,
 		decisions: map[int]decision{},
+		applied:   map[int]bool{},
 		start:     time.Now(),
 		width:     80,
 		height:    24,
 	}
 }
 
+// setStage updates a stage if it's already listed, or adds it if not — so a
+// second apply pass reuses the "Apply fixes" checkpoint instead of stacking up
+// a new one on every run.
 func (m *model) setStage(name string, st stageStatus) {
 	for i := range m.stages {
 		if m.stages[i].name == name {
@@ -180,6 +282,7 @@ func (m *model) setStage(name string, st stageStatus) {
 			return
 		}
 	}
+	m.stages = append(m.stages, stage{name, st})
 }
 
 func (m model) Init() tea.Cmd {
@@ -213,15 +316,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.rawText = strings.TrimSpace(msg.result)
 		}
+		if m.quitting {
+			return m, tea.Quit // the agent has exited; now it's safe to leave
+		}
 		return m, waitFor(m.events)
 
 	case fixDoneMsg:
-		m.phase = phaseFixed
+		// Back to the viewer rather than a terminal screen: the findings that were
+		// applied are marked, the rest stay markable, so the next pass is one
+		// keypress away.
+		m.phase = phaseDone
 		m.fixErr = msg.err
-		if msg.err != nil {
-			m.setStage("Apply fixes", stageFailed)
-		} else {
+		if msg.err == nil {
+			for _, i := range m.applying {
+				m.applied[i] = true
+			}
 			m.setStage("Apply fixes", stageDone)
+		} else {
+			m.setStage("Apply fixes", stageFailed)
+		}
+		m.fixSummary, m.fixFailed = fixOutcome(len(m.applying), m.dest, msg.err)
+		m.applying = nil
+		if m.quitting {
+			// The viewer that would render this banner is never drawn — carry it
+			// out so the agent's edits aren't reported by an empty screen.
+			m.exitNote = m.fixSummary
+			return m, tea.Quit
 		}
 		return m, waitFor(m.events)
 
@@ -242,7 +362,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "esc", "ctrl+c":
-		return m, tea.Quit
+		return m.requestQuit()
 	}
 	if m.phase != phaseDone {
 		return m, nil
@@ -273,24 +393,32 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor = len(m.items) - 1
 		}
 	case "f":
+		// Marking an already-applied finding clears that flag, so a fix that
+		// didn't take can simply be sent again.
 		m.decisions[m.cursor] = decFix
+		delete(m.applied, m.cursor)
 	case "a":
 		m.decisions[m.cursor] = decApprove
 	case "s":
 		m.decisions[m.cursor] = decSkip
 	case " ": // toggle current between fix and pending
-		if m.decisions[m.cursor] == decFix {
+		if m.decisions[m.cursor] == decFix && !m.applied[m.cursor] {
 			m.decisions[m.cursor] = decPending
 		} else {
 			m.decisions[m.cursor] = decFix
+			delete(m.applied, m.cursor)
 		}
-	case "A": // mark all to fix
+	case "A": // mark everything outstanding to fix, leaving applied ones alone
 		for i := range m.items {
-			m.decisions[i] = decFix
+			if !m.applied[i] {
+				m.decisions[i] = decFix
+			}
 		}
 	case "N": // clear all to pending
 		for i := range m.items {
-			m.decisions[i] = decPending
+			if !m.applied[i] {
+				m.decisions[i] = decPending
+			}
 		}
 	case "enter": // apply the agent fix to everything marked fix
 		return m.startFix()
@@ -298,39 +426,53 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// requestQuit leaves immediately when nothing is running. While an agent is
+// working it instead cancels it and waits: the agent may be part-way through
+// editing files, and in a `run` the caller re-checks and commits that tree the
+// moment we return. Quitting first would race those writes.
+func (m model) requestQuit() (tea.Model, tea.Cmd) {
+	if m.phase != phaseRunning && m.phase != phaseFixing {
+		return m, tea.Quit
+	}
+	if m.quitting {
+		return m, nil // already stopping; further presses would not make it faster
+	}
+	m.quitting = true
+	if m.cancelAgent != nil {
+		m.cancelAgent()
+	}
+	return m, nil
+}
+
 func (m model) startFix() (tea.Model, tea.Cmd) {
-	if m.agentCfg == nil || m.fixCount() == 0 {
+	todo := m.pending()
+	if m.agentCfg == nil || len(todo) == 0 {
 		return m, nil
 	}
-	m.fixedCount = m.fixCount()
-	prompt := fixPrompt(m.dir, m.items, m.decisions)
-	dir, a, ch := m.dir, m.agentCfg, m.events
+	prompt := fixPrompt(m.dir, m.items, m.decisions, m.applied)
+	ctx, dir, a, ch := m.agentCtx, m.dir, m.agentCfg, m.events
 	go func() {
-		_, err := agent.StreamFix(dir, a, prompt, func(act string) { ch <- activityMsg(act) })
+		_, err := agent.StreamFix(ctx, dir, a, prompt, func(act string) { emitActivity(ch, act) })
 		ch <- fixDoneMsg{err: err}
 	}()
+	m.applying = todo
 	m.phase = phaseFixing
 	m.activities = nil
+	m.fixSummary, m.fixFailed, m.fixErr = "", false, nil
 	m.start = time.Now()
-	m.stages = append(m.stages, stage{"Apply fixes", stageRunning})
+	m.setStage("Apply fixes", stageRunning)
 	return m, tea.Batch(m.spinner.Tick, tick())
 }
 
-// fixCount is the number of findings marked to fix.
-func (m model) fixCount() int {
-	n := 0
-	for _, d := range m.decisions {
-		if d == decFix {
-			n++
-		}
-	}
-	return n
+// pending is the set of findings the next apply would send to the agent.
+func (m model) pending() []int {
+	return pendingFixes(m.items, m.decisions, m.applied)
 }
 
 // fixPrompt builds the instruction for the agent to fix the findings marked
-// decFix. It prepends the repo's own conventions (AGENTS.md / CLAUDE.md) so the
-// fixes follow house style rather than generic defaults.
-func fixPrompt(dir string, items []findings.Finding, decisions map[int]decision) string {
+// decFix and not yet applied. It prepends the repo's own conventions (AGENTS.md
+// / CLAUDE.md) so the fixes follow house style rather than generic defaults.
+func fixPrompt(dir string, items []findings.Finding, decisions map[int]decision, applied map[int]bool) string {
 	var b strings.Builder
 	if conv := conventions(dir); conv != "" {
 		b.WriteString("Follow this repository's conventions when making changes:\n\n")
@@ -338,10 +480,8 @@ func fixPrompt(dir string, items []findings.Finding, decisions map[int]decision)
 		b.WriteString("\n\n---\n\n")
 	}
 	b.WriteString("Apply fixes for the following code review findings. Edit files directly to fix the root cause, make the smallest change that resolves each, match the surrounding code style, and do not disable or suppress checks.\n\n")
-	for i, f := range items {
-		if decisions[i] != decFix {
-			continue
-		}
+	for _, i := range pendingFixes(items, decisions, applied) {
+		f := items[i]
 		loc := f.File
 		if f.Line > 0 {
 			loc = fmt.Sprintf("%s:%d", f.File, f.Line)
@@ -401,8 +541,13 @@ func sevStyle(s findings.Severity) lipgloss.Style {
 	return lipgloss.NewStyle().Bold(true).Foreground(color)
 }
 
-// decisionGlyph renders a finding's chosen action as a compact marker.
-func decisionGlyph(d decision) string {
+// decisionGlyph renders a finding's state as a compact marker. An applied fix
+// outranks the chosen action: what the agent actually did is more useful to see
+// than what was asked for.
+func decisionGlyph(d decision, applied bool) string {
+	if applied {
+		return okStyle.Render("[done]")
+	}
 	switch d {
 	case decFix:
 		return selStyle.Render("[fix ]")
@@ -487,8 +632,6 @@ func (m model) View() string {
 	switch m.phase {
 	case phaseRunning, phaseFixing:
 		return m.pipelinePanel() + "\n" + m.logPanel() + "\n" + footerStyle.Render(m.footer())
-	case phaseFixed:
-		return m.pipelinePanel() + "\n\n" + m.fixedBody() + "\n" + footerStyle.Render(m.footer())
 	default:
 		return m.pipelinePanel() + "\n\n" + m.findingsBody() + "\n" + footerStyle.Render(m.footer())
 	}
@@ -498,11 +641,14 @@ func (m model) View() string {
 // a live elapsed timer next to the running one, and an overall status.
 func (m model) pipelinePanel() string {
 	status, statusColor := "running", lipgloss.Color("13")
-	if m.phase == phaseDone || m.phase == phaseFixed {
+	if m.phase == phaseDone {
 		status, statusColor = "done", lipgloss.Color("10")
 	}
 	if m.err != nil || m.fixErr != nil {
 		status, statusColor = "failed", lipgloss.Color("9")
+	}
+	if m.quitting {
+		status, statusColor = "stopping", lipgloss.Color("11")
 	}
 	right := lipgloss.NewStyle().Bold(true).Foreground(statusColor).Render(status)
 
@@ -560,14 +706,6 @@ func (m model) logPanel() string {
 	return panel("Log", "", rows, m.width)
 }
 
-func (m model) fixedBody() string {
-	if m.fixErr != nil {
-		return errStyle.Render("Fix failed") + "\n\n" + dimStyle.Render(clip(m.fixErr.Error(), m.width))
-	}
-	return okStyle.Render(fmt.Sprintf("✓ Applied fixes for %d finding(s).", m.fixedCount)) + "\n\n" +
-		dimStyle.Render("Files were edited in your working tree — review with `git diff`, then commit.")
-}
-
 func (m model) findingsBody() string {
 	if m.err != nil {
 		return errStyle.Render("Review failed") + "\n\n" + dimStyle.Render(clip(m.err.Error(), m.width))
@@ -582,10 +720,24 @@ func (m model) findingsBody() string {
 	var b strings.Builder
 	e, w, i := count(m.items)
 	head := titleStyle.Render("Findings") + dimStyle.Render("  "+summary(e, w, i))
-	if n := m.fixCount(); n > 0 {
+	if n := len(m.applied); n > 0 {
+		head += okStyle.Render(fmt.Sprintf("   %d fixed", n))
+	}
+	if n := len(m.pending()); n > 0 {
 		head += selStyle.Render(fmt.Sprintf("   %d to fix", n))
 	}
 	b.WriteString(head + "\n")
+	if m.fixSummary != "" {
+		style := okStyle
+		if m.fixFailed {
+			style = errStyle
+		}
+		width := m.width - 2
+		if width < 20 {
+			width = 20
+		}
+		b.WriteString(style.Width(width).Render(m.fixSummary) + "\n")
+	}
 	if m.notice != "" {
 		b.WriteString(dimStyle.Render(m.notice) + "\n")
 	}
@@ -601,7 +753,7 @@ func (m model) findingsBody() string {
 			title = titleStyle.Render(title)
 		}
 		act := actionStyle(f.Action).Render(fmt.Sprintf("%-8s", f.Action))
-		fmt.Fprintf(&b, "%s%s %s %s  %s\n", marker, decisionGlyph(m.decisions[idx]), sevStyle(f.Severity).Render(sevLabel(f.Severity)), act, clip(title, m.width-28))
+		fmt.Fprintf(&b, "%s%s %s %s  %s\n", marker, decisionGlyph(m.decisions[idx], m.applied[idx]), sevStyle(f.Severity).Render(sevLabel(f.Severity)), act, clip(title, m.width-28))
 	}
 
 	sel := m.items[m.cursor]
@@ -622,7 +774,10 @@ func (m model) findingsBody() string {
 func (m model) footer() string {
 	switch m.phase {
 	case phaseRunning, phaseFixing:
-		return "q abort"
+		if m.quitting {
+			return "stopping the agent — waiting for it to exit…"
+		}
+		return "q stop"
 	case phaseDone:
 		if len(m.items) == 0 {
 			return "q quit"
