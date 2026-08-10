@@ -95,7 +95,7 @@ supported CLI it finds and configures no agent when neither is installed.
 
 `init` and `configure` share one configurator. It discovers **tracked** project
 manifests recursively (`go.mod`, `package.json`, `mix.exs`, `Cargo.toml`,
-`pyproject.toml`) — ignored or untracked files never decide the stack, because
+`pyproject.toml`, a `Makefile` with a `ci`/`check`/`test` target) — ignored or untracked files never decide the stack, because
 the disposable worktree won't contain them. npm checks are proposed only for
 scripts that actually exist in the manifest, and generated commands are
 check-only (e.g. `mix format --check-formatted`). CI workflows are read as an

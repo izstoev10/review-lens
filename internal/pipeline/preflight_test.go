@@ -123,7 +123,7 @@ func TestSetupFailureIsAnEnvironmentError(t *testing.T) {
 
 // A check that cannot run (here: npm's missing-script signature) is invalid
 // configuration. The loop must surface that and stop — not hand it to the
-// agent as a code defect, which is exactly what happened in next_effort.
+// agent as a code defect, which burns fix attempts on an unfixable failure.
 func TestCheckAndFixRoutesConfigProblemsToTheUser(t *testing.T) {
 	cfg := gate(config.Check{
 		Name: "lint",
@@ -143,5 +143,30 @@ func TestCheckAndFixRoutesConfigProblemsToTheUser(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "review-lens configure") {
 		t.Errorf("err = %v, want a pointer to the configurator", err)
+	}
+}
+
+// The counterpart to the config-problem test: a genuine code failure must
+// reach the agent seam. The fake agent proves its invocation by dropping a
+// marker file.
+func TestCheckAndFixSendsGenuineFailuresToTheAgent(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "agent-was-here")
+
+	cfg := gate(config.Check{Name: "test", Cmd: []string{"sh", "-c", "echo assertion failed; exit 1"}})
+	cfg.MaxAgentAttempts = 1
+	cfg.Agent = &config.Agent{Cmd: []string{"sh", "-c", "touch " + marker}}
+
+	var log bytes.Buffer
+	_, err := checkAndFix(dir, cfg, &log)
+
+	if err == nil {
+		t.Fatal("the check never passes, so the loop must eventually fail")
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Error("a genuine check failure never reached the agent seam")
+	}
+	if !strings.Contains(err.Error(), "still failing") {
+		t.Errorf("err = %v, want the attempts-exhausted failure, not a config error", err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/izstoev10/review-lens/internal/config"
+	"github.com/izstoev10/review-lens/internal/discover"
 )
 
 // osMkdirWrite writes content to full, creating parent directories.
@@ -195,13 +196,14 @@ func TestComplexCIIsNotTranslated(t *testing.T) {
 		}, "\n"),
 	}, nil)
 
-	cfg, configured, out := configureRepo(t, root, config.Default(), "", false)
+	existing := config.Default()
+	cfg, configured, out := configureRepo(t, root, existing, "", false)
 
 	if configured {
 		t.Errorf("nothing here is reproducible, yet checks were configured: %q", flatten(cfg.Checks))
 	}
-	if len(cfg.Checks) != 0 {
-		t.Errorf("checks = %q, want none", flatten(cfg.Checks))
+	if flatten(cfg.Checks) != flatten(existing.Checks) {
+		t.Errorf("checks = %q, want the input untouched", flatten(cfg.Checks))
 	}
 	for _, feat := range []string{"services", "uses"} {
 		if !strings.Contains(out, feat) {
@@ -250,11 +252,32 @@ func TestNonInteractiveWithoutConfidenceLeavesUnconfigured(t *testing.T) {
 
 	cfg, configured, out := configureRepo(t, root, config.Default(), "", false)
 
-	if configured || len(cfg.Checks) != 0 || len(cfg.Setup) != 0 {
+	if configured {
 		t.Errorf("expected an unconfigured gate, got checks %q setup %q", flatten(cfg.Checks), flatten(cfg.Setup))
 	}
 	if !strings.Contains(out, "review-lens configure") {
 		t.Errorf("output %q should explain how to configure interactively", out)
+	}
+}
+
+// A blind (non-interactive) re-run that discovers nothing with confidence must
+// leave an existing gate intact — wiping it would destroy a working
+// configuration the moment the toolchain is missing from PATH.
+func TestNonInteractiveWithoutConfidencePreservesExistingGate(t *testing.T) {
+	// A Python project whose tools aren't installed in this environment.
+	root := fixtureRepo(t, map[string]string{"pyproject.toml": "[project]\nname='p'\n"}, nil)
+
+	existing := config.Default()
+	existing.Setup = []config.Check{{Name: "deps", Cmd: []string{"uv", "sync"}}}
+	existing.Checks = []config.Check{{Name: "test", Cmd: []string{"uv", "run", "pytest"}}}
+
+	cfg, configured, _ := configureRepo(t, root, existing, "", false)
+
+	if configured {
+		t.Fatal("nothing was discovered with confidence, yet the run claims it configured the gate")
+	}
+	if flatten(cfg.Checks) != flatten(existing.Checks) || flatten(cfg.Setup) != flatten(existing.Setup) {
+		t.Errorf("existing gate was modified: checks %q setup %q", flatten(cfg.Checks), flatten(cfg.Setup))
 	}
 }
 
@@ -290,4 +313,56 @@ func flatten(cs []config.Check) string {
 		parts = append(parts, strings.Join(c.Cmd, " "))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// The edit grammar is where the splice arithmetic lives; every command and
+// every rejected input is a table row, no scripted session needed.
+func TestApplyEdit(t *testing.T) {
+	three := func() []discover.Proposal {
+		return []discover.Proposal{
+			{Check: config.Check{Name: "a"}},
+			{Check: config.Check{Name: "b"}},
+			{Check: config.Check{Name: "c"}},
+		}
+	}
+	names := func(ps []discover.Proposal) string {
+		var out []string
+		for _, p := range ps {
+			out = append(out, p.Check.Name)
+		}
+		return strings.Join(out, "")
+	}
+
+	tests := []struct {
+		line       string
+		want       string
+		wantAction editAction
+	}{
+		{"", "abc", editAccept},
+		{"   ", "abc", editAccept},
+		{"q", "abc", editAbort},
+		{"a", "abc", editAdd},
+		{"s", "abc", editAddSetup},
+		{"d 1", "bc", editApplied},
+		{"d 3", "ab", editApplied},
+		{"d 4", "abc", editInvalid}, // out of range
+		{"d 0", "abc", editInvalid},
+		{"d x", "abc", editInvalid},
+		{"m 3 1", "cab", editApplied},
+		{"m 1 3", "bca", editApplied},
+		{"m 2 2", "abc", editApplied}, // no-op move is legal
+		{"m 1 4", "abc", editInvalid},
+		{"nonsense", "abc", editInvalid},
+	}
+	for _, tt := range tests {
+		t.Run(tt.line, func(t *testing.T) {
+			got, action := applyEdit(three(), tt.line)
+			if action != tt.wantAction {
+				t.Errorf("action = %v, want %v", action, tt.wantAction)
+			}
+			if names(got) != tt.want {
+				t.Errorf("list = %q, want %q", names(got), tt.want)
+			}
+		})
+	}
 }

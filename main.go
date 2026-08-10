@@ -104,9 +104,17 @@ func cmdInit() error {
 	}
 	// Discover the gate from tracked project manifests — the same workflow as
 	// `configure` — so ignored local tooling never decides the checks.
-	cfg, _, err = configureChecks(root, cfg)
+	cfg, configured, err := configureChecks(root, cfg)
 	if err != nil {
 		return err
+	}
+	// A non-interactive init that found nothing high-confidence writes NOTHING:
+	// a speculative config would either lie (placeholder gate) or block a later
+	// `init` in a terminal ("already exists"). Interactive init keeps whatever
+	// the user accepted — the preflight fails closed if that gate is empty.
+	if !configured && !isInitInteractive() {
+		fmt.Println("review-lens: no config written — run `review-lens init` in a terminal to set up the gate.")
+		return nil
 	}
 	if err := config.Save(path, cfg); err != nil {
 		return err
@@ -188,12 +196,17 @@ func cmdConfigure() error {
 	if err != nil {
 		return err
 	}
+	// Nothing accepted → nothing saved. The existing file (and its gate) stays
+	// exactly as the user left it; overwriting here would let a blind re-run
+	// destroy a working configuration.
+	if !configured {
+		fmt.Printf("review-lens: %s left untouched\n", path)
+		return nil
+	}
 	if err := config.Save(path, cfg); err != nil {
 		return err
 	}
-	if configured {
-		fmt.Printf("review-lens: gate updated in %s\n", path)
-	}
+	fmt.Printf("review-lens: gate updated in %s\n", path)
 	return nil
 }
 

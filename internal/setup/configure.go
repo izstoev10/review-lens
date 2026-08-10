@@ -52,8 +52,9 @@ func Configure(
 			}
 		}
 		if len(confident) == 0 {
-			cfg.Setup, cfg.Checks = nil, nil
-			fmt.Fprintln(out, "No checks could be proposed with confidence; leaving the gate unconfigured.")
+			// cfg is returned untouched: an existing gate must survive a blind
+			// re-run that discovered nothing, not be wiped by it.
+			fmt.Fprintln(out, "No checks could be proposed with confidence; leaving the gate as it is.")
 			fmt.Fprintln(out, "Run `review-lens configure` in a terminal to set up checks interactively.")
 			return cfg, false, nil
 		}
@@ -66,7 +67,7 @@ func Configure(
 		return cfg, false, err
 	}
 	if len(proposals) == 0 {
-		fmt.Fprintln(out, "No checks selected; leaving the gate unconfigured.")
+		fmt.Fprintln(out, "No checks selected; leaving the gate as it is.")
 		return cfg, false, nil
 	}
 	cfg.Setup, cfg.Checks = split(proposals)
@@ -86,6 +87,48 @@ func split(ps []discover.Proposal) (setup, checks []config.Check) {
 	return setup, checks
 }
 
+// editAction is what one line of input asks the edit loop to do next.
+type editAction int
+
+const (
+	editApplied  editAction = iota // the list was transformed; keep editing
+	editAccept                     // done — use the list as shown
+	editAbort                      // abandon configuration entirely
+	editAdd                        // prompt for a custom check
+	editAddSetup                   // prompt for a custom setup command
+	editInvalid                    // unrecognised input; show the help line
+)
+
+// applyEdit is the edit grammar: one input line against the current list.
+// Pure — the splice arithmetic for drop and move lives here where a table
+// test can hit every off-by-one, not inside the prompt loop.
+func applyEdit(ps []discover.Proposal, line string) ([]discover.Proposal, editAction) {
+	fields := strings.Fields(strings.TrimSpace(line))
+	switch {
+	case len(fields) == 0:
+		return ps, editAccept
+	case fields[0] == "q":
+		return ps, editAbort
+	case fields[0] == "a":
+		return ps, editAdd
+	case fields[0] == "s":
+		return ps, editAddSetup
+	case len(fields) == 2 && fields[0] == "d":
+		if i, ok := index(fields[1], len(ps)); ok {
+			return append(ps[:i], ps[i+1:]...), editApplied
+		}
+	case len(fields) == 3 && fields[0] == "m":
+		i, iok := index(fields[1], len(ps))
+		j, jok := index(fields[2], len(ps))
+		if iok && jok {
+			p := ps[i]
+			ps = append(ps[:i], ps[i+1:]...)
+			return append(ps[:j], append([]discover.Proposal{p}, ps[j:]...)...), editApplied
+		}
+	}
+	return ps, editInvalid
+}
+
 // editProposals is the interactive review loop: the numbered gate is printed,
 // and the user drops, moves, or adds entries until they accept with an empty
 // line. Input ending without an answer accepts whatever is listed, matching
@@ -101,38 +144,25 @@ func editProposals(ps []discover.Proposal, in io.Reader, out io.Writer) ([]disco
 			}
 			return ps, nil
 		}
-		line := strings.TrimSpace(sc.Text())
-		fields := strings.Fields(line)
-		switch {
-		case line == "":
+
+		var action editAction
+		ps, action = applyEdit(ps, sc.Text())
+		switch action {
+		case editAccept:
 			return ps, nil
-		case line == "q":
+		case editAbort:
 			return nil, fmt.Errorf("configuration aborted")
-		case len(fields) == 2 && fields[0] == "d":
-			if i, ok := index(fields[1], len(ps)); ok {
-				ps = append(ps[:i], ps[i+1:]...)
-				continue
-			}
-		case len(fields) == 3 && fields[0] == "m":
-			if i, ok := index(fields[1], len(ps)); ok {
-				if j, ok := index(fields[2], len(ps)); ok {
-					p := ps[i]
-					ps = append(ps[:i], ps[i+1:]...)
-					ps = append(ps[:j], append([]discover.Proposal{p}, ps[j:]...)...)
-					continue
-				}
-			}
-		case fields[0] == "a" || fields[0] == "s":
-			p, err := readCustom(sc, out, fields[0] == "s")
+		case editAdd, editAddSetup:
+			p, ok, err := readCustom(sc, out, action == editAddSetup)
 			if err != nil {
 				return nil, err
 			}
-			if p != nil {
-				ps = append(ps, *p)
+			if ok {
+				ps = append(ps, p)
 			}
-			continue
+		case editInvalid:
+			fmt.Fprintln(out, "Commands: enter accept · d N drop · m N M move · a add check · s add setup command · q abort")
 		}
-		fmt.Fprintln(out, "Commands: enter accept · d N drop · m N M move · a add check · s add setup command · q abort")
 	}
 }
 
@@ -146,8 +176,9 @@ func index(s string, n int) (int, bool) {
 }
 
 // readCustom prompts for one user-supplied command, so uncommon stacks are
-// never blocked by the built-in adapters.
-func readCustom(sc *bufio.Scanner, out io.Writer, isSetup bool) (*discover.Proposal, error) {
+// never blocked by the built-in adapters. ok=false means the user declined by
+// leaving a required field blank (or input ended).
+func readCustom(sc *bufio.Scanner, out io.Writer, isSetup bool) (p discover.Proposal, ok bool, err error) {
 	ask := func(label string) (string, error) {
 		fmt.Fprint(out, label)
 		if !sc.Scan() {
@@ -157,20 +188,20 @@ func readCustom(sc *bufio.Scanner, out io.Writer, isSetup bool) (*discover.Propo
 	}
 	name, err := ask("name: ")
 	if err != nil || name == "" {
-		return nil, err
+		return discover.Proposal{}, false, err
 	}
 	dir, err := ask("directory (blank = repo root): ")
 	if err != nil {
-		return nil, err
+		return discover.Proposal{}, false, err
 	}
 	cmd, err := ask("command: ")
 	if err != nil || cmd == "" {
-		return nil, err
+		return discover.Proposal{}, false, err
 	}
-	return &discover.Proposal{
+	return discover.Proposal{
 		Check: config.Check{Name: name, Cmd: strings.Fields(cmd), Dir: dir},
 		Setup: isSetup,
-	}, nil
+	}, true, nil
 }
 
 func printProposals(ps []discover.Proposal, out io.Writer) {
