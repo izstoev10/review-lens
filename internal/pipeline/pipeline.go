@@ -10,7 +10,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -52,8 +54,23 @@ func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) er
 	}()
 	fmt.Fprintf(log, "review-lens: isolated worktree at %s\n", wt.Path)
 
+	// 1.5 Preflight the gate itself before anything runs or the agent is asked
+	//     to fix anything: an empty gate must not appear green, and a check that
+	//     can't start (missing dir or executable) is a configuration error, not
+	//     a code defect.
+	if err := preflight(wt.Path, cfg); err != nil {
+		return err
+	}
+
+	// 1.6 Bootstrap: dependency/setup commands run once, before the check/fix
+	//     loop. Their failures are environment problems and are reported
+	//     directly — the agent is never asked to edit code to fix them.
+	if err := runSetup(wt.Path, cfg, log); err != nil {
+		return err
+	}
+
 	// 2. Check / fix loop.
-	agentRan, err := checkAndFix(wt, cfg, log)
+	agentRan, err := checkAndFix(wt.Path, cfg, log)
 	if err != nil {
 		return err
 	}
@@ -97,7 +114,7 @@ func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) er
 			return err
 		} else if changed {
 			fmt.Fprintln(log, "review-lens: review applied fixes — re-running checks…")
-			if _, err := checkAndFix(wt, cfg, log); err != nil {
+			if _, err := checkAndFix(wt.Path, cfg, log); err != nil {
 				return err
 			}
 			if changed, err := wt.HasChanges(); err != nil {
@@ -130,15 +147,58 @@ func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) er
 	return nil
 }
 
+// preflight validates the configured gate against the worktree before any
+// check or agent runs: there must be meaningful checks, and every command must
+// have an existing working directory and a resolvable executable. Failing here
+// names the broken piece and points at the configurator, because no amount of
+// agent-editing code can repair configuration.
+func preflight(dir string, cfg config.Config) error {
+	if !config.MeaningfulChecks(cfg) {
+		return fmt.Errorf("no meaningful checks configured — refusing to push an unvalidated branch; run `review-lens configure` to set up the gate")
+	}
+	for _, c := range append(append([]config.Check{}, cfg.Setup...), cfg.Checks...) {
+		if len(c.Cmd) == 0 {
+			return fmt.Errorf("check %q has no command; run `review-lens configure` to repair the gate", c.Name)
+		}
+		if c.Dir != "" {
+			if _, err := os.Stat(filepath.Join(dir, c.Dir)); err != nil {
+				return fmt.Errorf("check %q: working directory %q does not exist in the repo — run `review-lens configure` to repair the gate", c.Name, c.Dir)
+			}
+		}
+		if strings.ContainsRune(c.Cmd[0], os.PathSeparator) {
+			if _, err := os.Stat(filepath.Join(dir, c.Dir, c.Cmd[0])); err != nil {
+				return fmt.Errorf("check %q: command %q not found under %q — run `review-lens configure` to repair the gate", c.Name, c.Cmd[0], c.Dir)
+			}
+		} else if _, err := exec.LookPath(c.Cmd[0]); err != nil {
+			return fmt.Errorf("check %q: executable %q not found on PATH — install it or run `review-lens configure`", c.Name, c.Cmd[0])
+		}
+	}
+	return nil
+}
+
+// runSetup runs the bootstrap commands. A failure is reported as an
+// environment/configuration error with the command's output attached; it is
+// never routed to the fixing agent.
+func runSetup(dir string, cfg config.Config, log io.Writer) error {
+	for _, c := range cfg.Setup {
+		fmt.Fprintf(log, "review-lens:   [setup] %s\n", c.Name)
+		if r := checks.Run(dir, c); !r.Passed {
+			return fmt.Errorf("setup command %q failed — this is an environment/configuration problem, not a code defect; fix it or run `review-lens configure`:\n%s",
+				c.Name, strings.TrimSpace(r.Output))
+		}
+	}
+	return nil
+}
+
 // checkAndFix runs all checks, and on failure asks the agent to fix and retries,
 // up to cfg.MaxAgentAttempts. It returns agentRan=true if the agent was invoked
 // at least once (so the caller knows whether to commit). It returns an error if
 // checks are still failing when attempts run out (or if no agent is configured
 // to fix them).
-func checkAndFix(wt *gitx.Worktree, cfg config.Config, log io.Writer) (agentRan bool, err error) {
+func checkAndFix(dir string, cfg config.Config, log io.Writer) (agentRan bool, err error) {
 	attempts := cfg.MaxAgentAttempts
 	for i := 0; ; i++ {
-		results, ok := checks.RunAll(wt.Path, cfg.Checks)
+		results, ok := checks.RunAll(dir, cfg.Checks)
 		for _, r := range results {
 			status := "ok"
 			if !r.Passed {
@@ -152,6 +212,14 @@ func checkAndFix(wt *gitx.Worktree, cfg config.Config, log io.Writer) (agentRan 
 
 		failed := results[len(results)-1] // fail-fast: last result is the failure
 
+		// A failure the environment caused (missing executable, npm script,
+		// working directory) is invalid configuration: asking the agent to edit
+		// code for it would misdiagnose the problem and burn a fix attempt.
+		if failed.ConfigProblem != "" {
+			return agentRan, fmt.Errorf("check %q cannot run: %s — run `review-lens configure` to repair the gate\n%s",
+				failed.Name, failed.ConfigProblem, strings.TrimSpace(failed.Output))
+		}
+
 		if cfg.Agent == nil {
 			return agentRan, fmt.Errorf("check %q failed and no agent configured:\n%s", failed.Name, failed.Output)
 		}
@@ -162,7 +230,7 @@ func checkAndFix(wt *gitx.Worktree, cfg config.Config, log io.Writer) (agentRan 
 		fmt.Fprintf(log, "review-lens: attempt %d/%d — asking agent to fix %q (live output below)\n", i+1, attempts, failed.Name)
 		agentRan = true
 		prompt := agent.Prompt(failed.Name, failed.Output)
-		if err := agent.Fix(wt.Path, cfg.Agent, prompt, log); err != nil {
+		if err := agent.Fix(dir, cfg.Agent, prompt, log); err != nil {
 			return agentRan, fmt.Errorf("agent fix failed: %w", err)
 		}
 		fmt.Fprintln(log, "\nreview-lens: agent finished, re-running checks...")

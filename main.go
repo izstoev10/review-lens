@@ -5,8 +5,9 @@
 //
 // Usage:
 //
-//	review-lens init   # write a starter .review-lens.json in the current repo
-//	review-lens run    # gate the current branch
+//	review-lens init       # write a starter .review-lens.json in the current repo
+//	review-lens configure  # rediscover projects and update the checks
+//	review-lens run        # gate the current branch
 //	review-lens help
 //
 // This is an MVP. Deliberately missing (and good next steps): the
@@ -40,6 +41,8 @@ func main() {
 	switch os.Args[1] {
 	case "init":
 		err = cmdInit()
+	case "configure":
+		err = cmdConfigure()
 	case "run":
 		err = cmdRun()
 	case "pr":
@@ -64,6 +67,7 @@ func usage() {
 
 Commands:
   init      Write a starter .review-lens.json into the current repo
+  configure Rediscover the repo's projects and update the checks in .review-lens.json
   run       Gate the current branch (checks -> agent fix -> review -> push -> PR)
   pr [num]  Review an already-open PR's diff, read-only (current branch if no num)
   loop [num]  Auto-fix loop: review -> fix -> push -> poll CI -> re-review, until green
@@ -89,16 +93,18 @@ func cmdInit() error {
 		return err
 	}
 	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("%s already exists", path)
+		return fmt.Errorf("%s already exists — run `review-lens configure` to update its checks", path)
 	}
-	// Detect the project type so the starter checks match the repo. The tool
-	// itself is language-agnostic — this just picks convenient defaults.
 	root := filepath.Dir(path)
-	cfg := config.Detect(func(name string) bool {
-		_, err := os.Stat(filepath.Join(root, name))
-		return err == nil
-	})
+	cfg := config.Default()
+	cfg.Checks = nil // replaced by discovery; never keep the passing placeholder
 	cfg.Agent, err = setup.SelectAgent(os.Stdin, os.Stdout, isInitInteractive(), exec.LookPath)
+	if err != nil {
+		return err
+	}
+	// Discover the gate from tracked project manifests — the same workflow as
+	// `configure` — so ignored local tooling never decides the checks.
+	cfg, _, err = configureChecks(root, cfg)
 	if err != nil {
 		return err
 	}
@@ -164,6 +170,42 @@ func printInitSummary(root, cfgPath, reviewPath string) {
 	for _, l := range lines {
 		fmt.Println(l)
 	}
+}
+
+// cmdConfigure re-runs check discovery against an existing (or default) config
+// and saves the result. Everything that isn't the gate itself — agent, remote,
+// review, PR settings — is preserved.
+func cmdConfigure() error {
+	path, err := configPath()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	cfg, configured, err := configureChecks(filepath.Dir(path), cfg)
+	if err != nil {
+		return err
+	}
+	if err := config.Save(path, cfg); err != nil {
+		return err
+	}
+	if configured {
+		fmt.Printf("review-lens: gate updated in %s\n", path)
+	}
+	return nil
+}
+
+// configureChecks is the shared init/configure step: discover proposals from
+// tracked files, confirm them (interactively when possible), and merge them
+// into cfg without touching its other settings.
+func configureChecks(root string, cfg config.Config) (config.Config, bool, error) {
+	proposals, notes, err := setup.Propose(root, exec.LookPath)
+	if err != nil {
+		return cfg, false, err
+	}
+	return setup.Configure(cfg, proposals, notes, os.Stdin, os.Stdout, isInitInteractive())
 }
 
 func cmdRun() error {

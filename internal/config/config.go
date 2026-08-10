@@ -18,6 +18,10 @@ import (
 type Check struct {
 	Name string   `json:"name"` // human label, e.g. "test"
 	Cmd  []string `json:"cmd"`  // argv, e.g. ["go", "test", "./..."]
+	// Dir is the working directory the command runs in, relative to the repo
+	// root. Empty means the root itself — every pre-Dir config keeps working.
+	// This is what lets a monorepo's checks run inside their own project.
+	Dir string `json:"dir,omitempty"`
 }
 
 // Agent describes how to invoke an AI CLI. The prompt is appended as the final
@@ -37,6 +41,11 @@ type Agent struct {
 type Config struct {
 	// Remote is where a green branch gets pushed, e.g. "origin".
 	Remote string `json:"remote"`
+	// Setup commands run once before the check/fix loop — dependency installs
+	// and bootstrap (npm ci, mix deps.get). They are environment, not code: a
+	// setup failure is reported as a configuration problem and is never handed
+	// to the fixing agent as if the branch were broken.
+	Setup []Check `json:"setup,omitempty"`
 	// Checks run in order. The first failing check stops the run and (if an
 	// agent is configured) triggers a fix attempt.
 	Checks []Check `json:"checks"`
@@ -116,41 +125,22 @@ func CodexAgent() *Agent {
 	}}
 }
 
-// Detect inspects the repo root for well-known project markers and returns a
-// config with matching starter checks. The tool works with any language — this
-// just saves you writing the common cases by hand. Falls back to Default().
-//
-// exists is injected so this is trivially testable, but callers normally pass
-// a function backed by os.Stat.
-func Detect(exists func(name string) bool) Config {
-	cfg := Default()
-	switch {
-	case exists("go.mod"):
-		cfg.Checks = []Check{
-			{Name: "build", Cmd: []string{"go", "build", "./..."}},
-			{Name: "test", Cmd: []string{"go", "test", "./..."}},
-		}
-	case exists("package.json"):
-		cfg.Checks = []Check{
-			{Name: "lint", Cmd: []string{"npm", "run", "lint"}},
-			{Name: "test", Cmd: []string{"npm", "test"}},
-		}
-	case exists("Cargo.toml"):
-		cfg.Checks = []Check{
-			{Name: "build", Cmd: []string{"cargo", "build"}},
-			{Name: "test", Cmd: []string{"cargo", "test"}},
-		}
-	case exists("pyproject.toml"), exists("requirements.txt"), exists("setup.py"):
-		cfg.Checks = []Check{
-			{Name: "lint", Cmd: []string{"ruff", "check", "."}},
-			{Name: "test", Cmd: []string{"pytest"}},
-		}
-	case exists("Makefile"):
-		cfg.Checks = []Check{
-			{Name: "test", Cmd: []string{"make", "test"}},
+// Placeholder reports whether a check is the starter example Default writes —
+// a command that always passes without validating anything. A gate made only
+// of placeholders must not count as green, so callers use this to fail closed.
+func Placeholder(c Check) bool {
+	return len(c.Cmd) > 0 && c.Cmd[0] == "echo"
+}
+
+// MeaningfulChecks reports whether the config contains at least one check that
+// actually validates code (i.e. isn't a placeholder).
+func MeaningfulChecks(cfg Config) bool {
+	for _, c := range cfg.Checks {
+		if !Placeholder(c) {
+			return true
 		}
 	}
-	return cfg
+	return false
 }
 
 // Load reads config from path. If the file does not exist it returns Default()
