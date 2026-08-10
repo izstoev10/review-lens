@@ -10,7 +10,7 @@ import (
 
 var wantCodexCommand = []string{
 	"codex", "--ask-for-approval", "never",
-	"exec", "--sandbox", "workspace-write",
+	"exec", "--sandbox", "workspace-write", "--json",
 }
 
 func requireCodexAgent(t *testing.T, agentCommand []string) {

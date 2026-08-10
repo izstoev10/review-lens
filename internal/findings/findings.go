@@ -93,6 +93,51 @@ func Parse(raw string) (list []Finding, ok bool) {
 	return list, true
 }
 
+// Unparsable renders review output that Parse rejected, bounded so a malformed
+// response can never flood the terminal. It keeps the head of the text — the
+// output contract puts the JSON array first, so that's where the evidence of
+// what went wrong lives — and says how much was cut. The limits are generous
+// enough to show a whole prose answer from an agent that ignored the contract.
+const (
+	unparsableLines = 20
+	unparsableChars = 2000
+)
+
+func Unparsable(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "The review agent returned no output where a findings JSON array was expected."
+	}
+	all := strings.Split(raw, "\n")
+	var kept []string
+	used := 0
+	for _, ln := range all {
+		if len(kept) == unparsableLines || used+len(ln) > unparsableChars {
+			break
+		}
+		kept = append(kept, ln)
+		used += len(ln)
+	}
+	if len(kept) == 0 { // the first line alone blows the budget — clip it
+		r := []rune(all[0])
+		if len(r) > unparsableChars {
+			r = r[:unparsableChars]
+		}
+		kept = []string{string(r) + "…"}
+	}
+
+	var b strings.Builder
+	b.WriteString("The review response was not a findings JSON array. It starts:\n\n")
+	for _, ln := range kept {
+		b.WriteString("  " + ln + "\n")
+	}
+	if n := len(all) - len(kept); n > 0 {
+		fmt.Fprintf(&b, "  … [%d more lines omitted]\n", n)
+	}
+	b.WriteString("\nThis usually means the agent broke the output format for one run — re-running the review is the quickest fix.")
+	return b.String()
+}
+
 // counts returns the number of errors, warnings and infos.
 func counts(list []Finding) (e, w, i int) {
 	for _, f := range list {

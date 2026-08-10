@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/izstoev10/review-lens/internal/agent"
 	"github.com/izstoev10/review-lens/internal/findings"
 )
@@ -177,5 +179,25 @@ func TestFixOutcome(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A malformed final response must reach the viewer as a bounded excerpt, not
+// the full text — on a broken run it can be an entire transcript.
+func TestMalformedReviewResultIsBounded(t *testing.T) {
+	m := newModel("t", t.TempDir(), nil, make(chan tea.Msg, 1))
+	huge := strings.Repeat("not json, line after line\n", 2000)
+
+	next, _ := m.Update(doneMsg{result: huge})
+	got := next.(model).rawText
+
+	if got == "" {
+		t.Fatal("a malformed result should still produce a fallback report")
+	}
+	if len(got) > 4000 {
+		t.Errorf("fallback report is %d bytes — not bounded", len(got))
+	}
+	if !strings.Contains(got, "not json, line after line") {
+		t.Error("fallback report should preserve the start of the response for diagnosis")
 	}
 }

@@ -1,10 +1,12 @@
 // Package agent invokes an AI coding CLI to attempt a fix or a review.
 //
-// When the configured command emits Claude's streaming JSON (--output-format
-// stream-json), we parse that stream: each line is an event, and we surface a
-// human-readable activity ("read handler.go", "grep TODO") as it happens, then
-// return the agent's final text. Fix success is judged by re-running the checks
-// afterwards, never by parsing agent output.
+// When the configured command emits a structured event stream — Claude's
+// --output-format stream-json or Codex's `exec --json` JSONL — we parse it:
+// each line is an event, and we surface a human-readable activity ("read
+// handler.go", "grep TODO") as it happens, then return the agent's final text.
+// Commands without an event stream return their stdout as the final text, with
+// stderr kept apart as diagnostics. Fix success is judged by re-running the
+// checks afterwards, never by parsing agent output.
 package agent
 
 import (
@@ -16,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -108,17 +111,40 @@ Diff:
 %s`, template, truncate(diff, maxInput))
 }
 
-// CanStream reports whether the configured command emits Claude's stream-json.
-func CanStream(a *config.Agent) bool {
-	if a == nil {
-		return false
+// streamFormat identifies the structured event protocol (if any) the configured
+// command emits on stdout. It decides how execAgent separates the agent's final
+// answer from its activity and from transport diagnostics — the three must never
+// reach the findings parser as one concatenated blob.
+type streamFormat int
+
+const (
+	// formatPlain: no structured events. Stdout is the final answer, stderr is
+	// diagnostics; there is no live activity to translate.
+	formatPlain streamFormat = iota
+	// formatClaude: Claude Code's --output-format stream-json events.
+	formatClaude
+	// formatCodex: Codex's `exec --json` JSONL events.
+	formatCodex
+)
+
+// detectFormat inspects the configured argv. Claude is recognised by its
+// distinctive "stream-json" flag value, Codex by the codex binary run with
+// --json. Anything else is treated as plain output, which still works
+// everywhere — it just has no live activity feed.
+func detectFormat(a *config.Agent) streamFormat {
+	if a == nil || len(a.Cmd) == 0 {
+		return formatPlain
 	}
+	codexBin := strings.Contains(filepath.Base(a.Cmd[0]), "codex")
 	for _, s := range a.Cmd {
 		if s == "stream-json" {
-			return true
+			return formatClaude
+		}
+		if s == "--json" && codexBin {
+			return formatCodex
 		}
 	}
-	return false
+	return formatPlain
 }
 
 // onActivity is called with a short human-readable description of each agent
@@ -132,8 +158,8 @@ type onActivity func(string)
 var ErrCanceled = errors.New("agent canceled")
 
 // exec runs the agent with prompt appended, inside dir. If the command streams
-// JSON it is parsed for activity + final text; otherwise the raw combined
-// output is returned as the text. activity (if non-nil) is called per event.
+// structured events they are parsed for activity + final text; otherwise
+// stdout is returned as the text. activity (if non-nil) is called per event.
 //
 // Cancelling parent kills the agent process and makes execAgent return once it
 // has actually exited — so a caller that cancels can rely on no further file
@@ -157,15 +183,9 @@ func execAgent(parent context.Context, dir string, a *config.Agent, prompt strin
 		cmd.WaitDelay = 2 * time.Second
 	}
 
-	if !CanStream(a) {
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			if parent.Err() != nil {
-				return string(out), ErrCanceled
-			}
-			return string(out), fmt.Errorf("agent %q failed: %w", a.Cmd[0], err)
-		}
-		return strings.TrimSpace(string(out)), nil
+	format := detectFormat(a)
+	if format == formatPlain {
+		return execPlain(parent, ctx, cmd, a, activity)
 	}
 
 	stdout, err := cmd.StdoutPipe()
@@ -178,7 +198,12 @@ func execAgent(parent context.Context, dir string, a *config.Agent, prompt strin
 		return "", fmt.Errorf("starting agent %q: %w", a.Cmd[0], err)
 	}
 
-	result := parseStream(stdout, activity)
+	var result string
+	if format == formatCodex {
+		result = parseCodexStream(stdout, activity)
+	} else {
+		result = parseStream(stdout, activity)
+	}
 
 	// Wait reaps the process, so once it returns the agent can no longer write
 	// files — which is what makes cancellation safe for the caller.
@@ -193,6 +218,29 @@ func execAgent(parent context.Context, dir string, a *config.Agent, prompt strin
 		return result, fmt.Errorf("agent %q failed: %w\n%s", a.Cmd[0], waitErr, strings.TrimSpace(stderr.String()))
 	}
 	return result, nil
+}
+
+// execPlain runs an agent with no structured event stream. The final answer is
+// stdout alone — stderr is diagnostics and only ever surfaces inside an error —
+// so transport noise can't corrupt the findings JSON. One activity line tells a
+// live UI it's a blind wait rather than a stall.
+func execPlain(parent, ctx context.Context, cmd *exec.Cmd, a *config.Agent, activity onActivity) (string, error) {
+	if activity != nil {
+		activity("waiting for " + a.Cmd[0] + " — it emits no live progress")
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	text := strings.TrimSpace(stdout.String())
+	switch {
+	case parent.Err() != nil:
+		return text, ErrCanceled
+	case ctx.Err() == context.DeadlineExceeded:
+		return text, fmt.Errorf("agent %q timed out after %s", a.Cmd[0], timeout)
+	case err != nil:
+		return text, fmt.Errorf("agent %q failed: %w\n%s", a.Cmd[0], err, strings.TrimSpace(stderr.String()))
+	}
+	return text, nil
 }
 
 // streamEvent is the subset of Claude's stream-json we care about.
