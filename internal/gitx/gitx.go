@@ -36,6 +36,21 @@ func CurrentBranch(dir string) (string, error) {
 	return run(dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
+// TrackedFiles lists every tracked path in the repo at root, relative to it.
+// Ignored and untracked files are absent by definition — which is exactly the
+// view a disposable worktree gets, so discovery based on this list can never
+// propose checks against files the worktree won't contain.
+func TrackedFiles(root string) ([]string, error) {
+	out, err := run(root, "ls-files")
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
 // Fetch updates the remote-tracking ref for branch from remote, so a worktree
 // can be based on the branch's latest remote head (e.g. the head of an open PR).
 // It's best-effort: the caller decides how to proceed if the remote is

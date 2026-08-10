@@ -80,10 +80,10 @@ which `review-lens run` stamps for you.
 
 ```sh
 cd your-repo
-review-lens init      # writes .review-lens.json
-# edit .review-lens.json to set your checks / agent
+review-lens init      # discover the repo's projects, write .review-lens.json
+review-lens configure # rediscover projects / repair the checks later
 
-review-lens run       # full gate: checks -> fix -> review -> push -> PR
+review-lens run       # full gate: setup -> checks -> fix -> review -> push -> PR
 review-lens pr        # review the current branch's OPEN PR, read-only
 review-lens pr 1234   # review a specific PR by number
 ```
@@ -92,6 +92,20 @@ When run in a terminal, `init` detects installed agent CLIs and asks which one
 to use for fixes and reviews. Claude Code and Codex are supported directly; you
 can also choose no agent. In non-interactive use, `init` selects the first
 supported CLI it finds and configures no agent when neither is installed.
+
+`init` and `configure` share one configurator. It discovers **tracked** project
+manifests recursively (`go.mod`, `package.json`, `mix.exs`, `Cargo.toml`,
+`pyproject.toml`) — ignored or untracked files never decide the stack, because
+the disposable worktree won't contain them. npm checks are proposed only for
+scripts that actually exist in the manifest, and generated commands are
+check-only (e.g. `mix format --check-formatted`). CI workflows are read as an
+advisory source: a repository-owned gate that CI invokes (`make ci`,
+`scripts/check`) is preferred, plain steps become suggestions, and actions,
+services, matrices, or secrets are named as not locally reproducible rather
+than guessed at. In a terminal you review the proposed gate — drop, reorder,
+add custom commands — before it's written; non-interactively only
+high-confidence proposals are accepted, and with none the gate is left
+unconfigured rather than filled with guesses.
 
 `pr` is the safe, read-only path: it pulls the PR diff via `gh pr diff`, has the
 agent review it, and shows findings. Nothing is committed, pushed, or edited —
@@ -121,9 +135,12 @@ feed, then the same findings viewer.
 ```json
 {
   "remote": "origin",
+  "setup": [
+    { "name": "deps", "cmd": ["mix", "deps.get"], "dir": "server" }
+  ],
   "checks": [
     { "name": "build", "cmd": ["go", "build", "./..."] },
-    { "name": "test",  "cmd": ["go", "test", "./..."] }
+    { "name": "test",  "cmd": ["mix", "test"], "dir": "server" }
   ],
   "agent": { "cmd": ["codex", "--ask-for-approval", "never", "exec", "--sandbox", "workspace-write", "--json"] },
   "maxAgentAttempts": 2,
@@ -135,7 +152,15 @@ feed, then the same findings viewer.
 ```
 
 - **checks** run in order, fail-fast. A check passes when its command exits 0.
-  These are the gate — a red check blocks the push.
+  These are the gate — a red check blocks the push. An optional **dir** runs the
+  command in that repo-relative directory, so monorepo projects validate
+  themselves from their own root. Before anything runs, the gate is preflighted:
+  working directories and executables must exist, and a run with no meaningful
+  checks refuses to push (`review-lens configure` repairs the gate).
+- **setup** commands (optional) bootstrap the worktree before the checks — `npm
+  ci`, `mix deps.get`. Their failures are environment problems: they stop the
+  run with the output shown, and are never handed to the fixing agent as code
+  defects.
 - **agent** is optional. Its command is invoked inside the worktree with the
   prompt appended as the final argument (`claude -p "<prompt>"`). Set to `null`
   to only report failures instead of fixing/reviewing.
@@ -230,10 +255,11 @@ the PR body — the check re-runs on edit.
 ## Layout
 
 ```
-main.go                 CLI entrypoint: init | run | pr | loop | help
+main.go                 CLI entrypoint: init | configure | run | pr | loop | help
 internal/config         load/save .review-lens.json  (stdlib only)
 internal/gitx           git wrappers: worktree lifecycle, diff, push
-internal/checks         run configured commands, report pass/fail
+internal/checks         run configured commands (per-project dirs), report pass/fail
+internal/discover       propose checks from tracked manifests + CI workflows
 internal/guidance       load editable review criteria (fallback to default)
 internal/agent          build prompt + invoke the agent CLI
 internal/findings       parse + render structured review findings
