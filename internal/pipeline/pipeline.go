@@ -232,8 +232,10 @@ func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance str
 	prompt := agent.ReviewPrompt(reviewGuidance, diff)
 
 	// Interactive: the live TUI, run in the worktree so any applied fixes stay
-	// isolated and can be re-gated + pushed by the caller.
-	if interactive && agent.CanStream(cfg.Agent) {
+	// isolated and can be re-gated + pushed by the caller. Every agent gets the
+	// TUI — one with no event stream shows a waiting state instead of a live
+	// feed, then the same findings viewer.
+	if interactive {
 		fmt.Fprintf(log, "review-lens: reviewing changes vs %s...\n", base)
 		return tui.RunReview(wt.Path, cfg.Agent, prompt, "Reviewing changes vs "+base, tui.DestWorktree, log)
 	}
@@ -244,26 +246,18 @@ func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance str
 		return err
 	}
 	fmt.Fprintln(log)
-	showReview(raw, log, false, "", nil)
+	showReview(raw, log)
 	return nil
 }
 
-// showReview presents an agent's raw review output. When interactive, it opens
-// the bubbletea TUI (dir + agent enable its fix action); otherwise (piped, or
-// mid-`run`) it prints the colourised report. Falls back to raw text if the
-// output isn't parseable JSON, and to the plain report if the TUI can't start.
-func showReview(raw string, log io.Writer, interactive bool, dir string, a *config.Agent) {
+// showReview prints an agent's raw review output as the compact colourised
+// report. Output that isn't a findings array gets a bounded excerpt — never
+// the whole response, which on a broken run can be an entire transcript.
+func showReview(raw string, log io.Writer) {
 	list, ok := findings.Parse(raw)
 	if !ok {
-		fmt.Fprintln(log, strings.TrimSpace(raw))
+		fmt.Fprintln(log, findings.Unparsable(raw))
 		return
-	}
-	if interactive && len(list) > 0 {
-		// Only reached from `pr`, which runs the agent in the real repo.
-		if err := tui.Show(list, dir, a, tui.DestWorkingTree, log); err == nil {
-			return
-		}
-		// TUI failed to start (e.g. not a real terminal) — fall through to plain.
 	}
 	findings.Render(log, list, true)
 }

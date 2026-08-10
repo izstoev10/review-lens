@@ -98,22 +98,6 @@ func RunReview(dir string, a *config.Agent, prompt, title string, dest Dest, out
 	return runProgram(p, out)
 }
 
-// Show displays already-computed findings (no live review phase).
-func Show(items []findings.Finding, dir string, a *config.Agent, dest Dest, out io.Writer) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	ch := make(chan tea.Msg, 128)
-	m := newModel("", dir, a, ch)
-	m.dest = dest
-	m.agentCtx, m.cancelAgent = ctx, cancel
-	m.phase = phaseDone
-	m.items = items
-	m.decisions = defaultDecisions(items)
-	m.stages = []stage{{"Review", stageDone}, {"Findings", stageDone}}
-	return runProgram(tea.NewProgram(m, tea.WithAltScreen()), out)
-}
-
 // runProgram drives the UI and, once the alt screen is gone, leaves a durable
 // record of anything it changed on disk.
 //
@@ -370,7 +354,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.items = list
 			m.decisions = defaultDecisions(list)
 		} else {
-			m.rawText = strings.TrimSpace(msg.result)
+			// Bounded: the result is already just the agent's final message, but
+			// a malformed one can still be arbitrarily large.
+			m.rawText = findings.Unparsable(msg.result)
 		}
 		if m.quitting {
 			return m, tea.Quit // the agent has exited; now it's safe to leave

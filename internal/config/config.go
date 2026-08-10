@@ -108,11 +108,13 @@ func ClaudeAgent() *Agent {
 }
 
 // CodexAgent returns a non-interactive Codex configuration that can edit the
-// disposable worktree without pausing for an approval prompt.
+// disposable worktree without pausing for an approval prompt. --json makes
+// Codex emit JSONL events, which drive the live activity feed and keep the
+// final answer separate from transport diagnostics.
 func CodexAgent() *Agent {
 	return &Agent{Cmd: []string{
 		"codex", "--ask-for-approval", "never",
-		"exec", "--sandbox", "workspace-write",
+		"exec", "--sandbox", "workspace-write", "--json",
 	}}
 }
 

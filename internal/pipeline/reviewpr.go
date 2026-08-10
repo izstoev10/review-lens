@@ -49,10 +49,10 @@ func ReviewPR(dir, number string, cfg config.Config, log io.Writer, interactive 
 	}
 	prompt := agent.ReviewPrompt(guidance.Load(root, cfg.ReviewGuidancePath), diff)
 
-	// Best experience: an interactive terminal + a streaming agent gets the live
-	// TUI (activity while it works, then findings). Otherwise fall back to a
-	// plain run: capture output, then render (static TUI if interactive).
-	if interactive && agent.CanStream(cfg.Agent) {
+	// An interactive terminal gets the live TUI (activity while the agent works
+	// — or a waiting state if it emits no events — then findings). Piped output
+	// gets the plain report. Same rules as `run`.
+	if interactive {
 		return tui.RunReview(dir, cfg.Agent, prompt, "Reviewing "+target, tui.DestWorkingTree, log)
 	}
 
@@ -62,7 +62,7 @@ func ReviewPR(dir, number string, cfg config.Config, log io.Writer, interactive 
 		return err
 	}
 	fmt.Fprintln(log)
-	showReview(raw, log, interactive, dir, cfg.Agent)
+	showReview(raw, log)
 	return nil
 }
 
