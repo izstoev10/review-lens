@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 	"testing"
@@ -46,7 +47,7 @@ func TestApplyReturnsToAWorkingViewer(t *testing.T) {
 	if got := len(m.pending()); got != 0 {
 		t.Errorf("pending = %d, want 0 — a fixed finding must not be re-sent", got)
 	}
-	if m.fixSummary == "" {
+	if m.fixResult.empty() {
 		t.Error("expected an outcome banner after applying")
 	}
 
@@ -74,7 +75,7 @@ func TestFailedApplyKeepsTheWorkQueued(t *testing.T) {
 	if m.applied[0] {
 		t.Error("a failed apply must not mark the finding as fixed")
 	}
-	if !m.fixFailed {
+	if !m.fixResult.failed {
 		t.Error("expected the outcome banner to be styled as a failure")
 	}
 	if got := m.pending(); len(got) != 1 || got[0] != 0 {
@@ -131,21 +132,78 @@ func TestQuitDuringApplyWaitsForTheAgent(t *testing.T) {
 	}
 }
 
-// Quitting mid-apply tears down the alt screen without ever drawing the viewer,
-// so the outcome has to survive the exit: on the `pr` path the agent has just
-// edited the user's own files, and a silent exit hides that entirely.
+// The alt screen is discarded on exit, so anything the session did to the user's
+// files has to be reported on the way out. Quitting mid-apply is the sharpest
+// case: the viewer never draws the banner at all.
 func TestQuitDuringApplyReportsWhatTheAgentDid(t *testing.T) {
 	m := fixingModel(t)
 	m.dest = DestWorkingTree
 	m.quitting = true
+	m.fixRan = true
 
 	next, _ := m.Update(fixDoneMsg{err: agent.ErrCanceled})
-	note := next.(model).exitNote
-	if note == "" {
-		t.Fatal("quitting mid-apply left nothing to print — the edits go unreported")
+
+	var out bytes.Buffer
+	next.(model).reportExit(&out)
+	got := out.String()
+
+	if got == "" {
+		t.Fatal("quitting mid-apply printed nothing — the agent's edits go unreported")
 	}
-	if !strings.Contains(note, "kept") {
-		t.Errorf("exitNote = %q, want it to say the agent's edits are kept", note)
+	if !strings.Contains(got, "canceled") {
+		t.Errorf("report = %q, want it to say the apply was canceled", got)
+	}
+	// The agent may have edited files before it was killed, and this is the only
+	// place the user would ever learn that.
+	if !strings.Contains(got, "git diff") {
+		t.Errorf("report = %q, want it to point at the possibly-edited working tree", got)
+	}
+}
+
+// The banner is lost on a *normal* exit too — the user reads it, presses q, and
+// the terminal is restored with no record of which files changed.
+func TestNormalExitAfterApplyingStillReports(t *testing.T) {
+	m := fixingModel(t)
+	m.dest = DestWorkingTree
+	m.fixRan = true
+	m.items[0] = findings.Finding{File: "internal/tui/tui.go", Line: 330, Title: "silent exit"}
+
+	next, _ := m.Update(fixDoneMsg{}) // succeeds; no quit pending
+
+	var out bytes.Buffer
+	next.(model).reportExit(&out)
+	got := out.String()
+
+	for _, want := range []string{"Applied fixes for 1 finding", "internal/tui/tui.go:330", "silent exit", "git diff"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("report = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+// A run path fix is committed and pushed by the pipeline, so the report must not
+// send the user looking for it in their own tree.
+func TestWorktreeExitReportDoesNotMentionGitDiff(t *testing.T) {
+	m := fixingModel(t)
+	m.dest = DestWorktree
+	m.fixRan = true
+
+	next, _ := m.Update(fixDoneMsg{})
+
+	var out bytes.Buffer
+	next.(model).reportExit(&out)
+	if got := out.String(); strings.Contains(got, "git diff") {
+		t.Errorf("report = %q, must not point at the user's tree on the run path", got)
+	}
+}
+
+// A read-only review that never applied anything has nothing to say, and must
+// not add noise to the end of a `run`.
+func TestReviewWithoutApplyingReportsNothing(t *testing.T) {
+	var out bytes.Buffer
+	fixingModel(t).reportExit(&out)
+	if got := out.String(); got != "" {
+		t.Errorf("report = %q, want nothing when no apply ran", got)
 	}
 }
 

@@ -161,10 +161,11 @@ func TestFixOutcome(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, failed := fixOutcome(tt.n, tt.dest, tt.err)
-			if failed != tt.wantFailed {
-				t.Errorf("failed = %v, want %v", failed, tt.wantFailed)
+			o := fixOutcome(tt.n, tt.dest, tt.err)
+			if o.failed != tt.wantFailed {
+				t.Errorf("failed = %v, want %v", o.failed, tt.wantFailed)
 			}
+			got := o.banner()
 			for _, want := range tt.contains {
 				if !strings.Contains(got, want) {
 					t.Errorf("outcome %q should contain %q", got, want)

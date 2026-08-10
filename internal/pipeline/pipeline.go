@@ -235,7 +235,7 @@ func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance str
 	// isolated and can be re-gated + pushed by the caller.
 	if interactive && agent.CanStream(cfg.Agent) {
 		fmt.Fprintf(log, "review-lens: reviewing changes vs %s...\n", base)
-		return tui.RunReview(wt.Path, cfg.Agent, prompt, "Reviewing changes vs "+base, tui.DestWorktree)
+		return tui.RunReview(wt.Path, cfg.Agent, prompt, "Reviewing changes vs "+base, tui.DestWorktree, log)
 	}
 
 	fmt.Fprintf(log, "review-lens: reviewing changes vs %s...\n", base)
@@ -260,7 +260,7 @@ func showReview(raw string, log io.Writer, interactive bool, dir string, a *conf
 	}
 	if interactive && len(list) > 0 {
 		// Only reached from `pr`, which runs the agent in the real repo.
-		if err := tui.Show(list, dir, a, tui.DestWorkingTree); err == nil {
+		if err := tui.Show(list, dir, a, tui.DestWorkingTree, log); err == nil {
 			return
 		}
 		// TUI failed to start (e.g. not a real terminal) — fall through to plain.
