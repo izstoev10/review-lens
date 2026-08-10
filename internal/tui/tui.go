@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,7 +81,7 @@ const (
 
 // RunReview streams a review live, then shows selectable findings. dest tells
 // the viewer where any applied fixes end up, so it can say what happens next.
-func RunReview(dir string, a *config.Agent, prompt, title string, dest Dest) error {
+func RunReview(dir string, a *config.Agent, prompt, title string, dest Dest, out io.Writer) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -94,11 +95,11 @@ func RunReview(dir string, a *config.Agent, prompt, title string, dest Dest) err
 		result, err := agent.StreamReview(ctx, dir, a, prompt, func(act string) { emitActivity(ch, act) })
 		ch <- doneMsg{result: result, err: err}
 	}()
-	return run(p)
+	return runProgram(p, out)
 }
 
 // Show displays already-computed findings (no live review phase).
-func Show(items []findings.Finding, dir string, a *config.Agent, dest Dest) error {
+func Show(items []findings.Finding, dir string, a *config.Agent, dest Dest, out io.Writer) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -110,17 +111,20 @@ func Show(items []findings.Finding, dir string, a *config.Agent, dest Dest) erro
 	m.items = items
 	m.decisions = defaultDecisions(items)
 	m.stages = []stage{{"Review", stageDone}, {"Findings", stageDone}}
-	return run(tea.NewProgram(m, tea.WithAltScreen()))
+	return runProgram(tea.NewProgram(m, tea.WithAltScreen()), out)
 }
 
-// run drives the program and, once the alt screen is gone, prints whatever the
-// UI had to say but never got to show. Quitting mid-apply skips the viewer, so
-// without this a session in which the agent edited the user's files ends with a
-// blank terminal and no hint that anything changed.
-func run(p *tea.Program) error {
+// runProgram drives the UI and, once the alt screen is gone, leaves a durable
+// record of anything it changed on disk.
+//
+// The viewer lives in the alt screen, which the terminal discards on exit — so
+// without this, *every* session that edited files ends at a clean prompt with
+// no trace of it. Quitting mid-apply is only the sharpest case, where the
+// banner is never even drawn.
+func runProgram(p *tea.Program, out io.Writer) error {
 	final, err := p.Run()
-	if m, ok := final.(model); ok && m.exitNote != "" {
-		fmt.Println(m.exitNote)
+	if m, ok := final.(model); ok {
+		m.reportExit(out)
 	}
 	return err
 }
@@ -193,23 +197,73 @@ func pendingFixes(items []findings.Finding, decisions map[int]decision, applied 
 	return idx
 }
 
-// fixOutcome is the banner shown after an apply: what happened, and what the
-// user is expected to do about it. The advice hinges on dest — in a `run` the
-// fixes are in a throwaway worktree that review-lens re-gates and pushes, so
-// telling the user to `git diff` would point them at an unchanged tree.
-func fixOutcome(n int, dest Dest, err error) (text string, failed bool) {
+// outcome is the result of an apply, split into what happened and what the user
+// should do about it. Two parts rather than one string because the two readers
+// want different shapes: the in-viewer banner runs them together on one line,
+// while the exit report puts the list of applied findings between them.
+type outcome struct {
+	headline string
+	advice   string
+	failed   bool
+}
+
+func (o outcome) empty() bool { return o.headline == "" }
+
+// banner is the one-line form shown inside the viewer.
+func (o outcome) banner() string {
+	if o.advice == "" {
+		return o.headline
+	}
+	return o.headline + " " + o.advice
+}
+
+// fixOutcome describes an apply that has just finished. The advice hinges on
+// dest — in a `run` the fixes are in a throwaway worktree that review-lens
+// re-gates and pushes, so telling the user to `git diff` would point them at an
+// unchanged tree.
+func fixOutcome(n int, dest Dest, err error) outcome {
+	// Cancelled and failed applies are both reported as touching files: the agent
+	// may have edited several before it stopped, and the user has no other way to
+	// find out.
 	switch {
 	case errors.Is(err, agent.ErrCanceled):
-		return "Apply canceled — the agent was stopped; any edits it had already made are kept.", true
+		return outcome{
+			headline: "Apply canceled — the agent was stopped; any edits it had already made are kept.",
+			advice:   mayHaveEditedAdvice(dest),
+			failed:   true,
+		}
 	case err != nil:
-		return "Apply failed: " + err.Error(), true
+		return outcome{
+			headline: "Apply failed: " + err.Error(),
+			advice:   mayHaveEditedAdvice(dest),
+			failed:   true,
+		}
 	}
-	done := fmt.Sprintf("✓ Applied fixes for %s.", plural(n, "finding"))
+	o := outcome{headline: fmt.Sprintf("✓ Applied fixes for %s.", plural(n, "finding"))}
 	if dest == DestWorktree {
-		return done + " They stay in review-lens's worktree — your own files are untouched; " +
-			"the checks re-run over them and they ride along in the push.", false
+		o.advice = "They stay in review-lens's worktree — your own files are untouched; " +
+			"the checks re-run over them and they ride along in the push."
+	} else {
+		o.advice = "Files in your working tree were edited — review with `git diff`, then commit."
 	}
-	return done + " Files in your working tree were edited — review with `git diff`, then commit.", false
+	return o
+}
+
+// mayHaveEditedAdvice covers the interrupted cases, where we know the agent was
+// running but not how far it got.
+func mayHaveEditedAdvice(dest Dest) string {
+	if dest == DestWorktree {
+		return "Anything it changed is in review-lens's worktree and will be re-checked before the push."
+	}
+	return "Files in your working tree may have been edited — check with `git diff`."
+}
+
+// location renders a finding's file[:line] the one way the whole UI shows it.
+func location(f findings.Finding) string {
+	if f.Line > 0 {
+		return fmt.Sprintf("%s:%d", f.File, f.Line)
+	}
+	return f.File
 }
 
 type model struct {
@@ -234,11 +288,13 @@ type model struct {
 	rawText   string
 	err       error
 
-	dest       Dest
-	fixSummary string // outcome banner from the last apply; survives keypresses
-	fixFailed  bool
-	fixErr     error
-	exitNote   string // outcome the viewer never got to show; printed after the UI exits
+	dest      Dest
+	fixResult outcome // result of the last apply; survives keypresses
+	fixErr    error
+	// fixRan records that an apply was started at some point. The exit report
+	// keys off this rather than off applied findings, because a cancelled apply
+	// marks nothing as applied yet may still have edited files.
+	fixRan bool
 
 	// Cancelling agentCtx kills the running agent. quitting records that the user
 	// asked to leave mid-run: we hold the quit until the agent has actually
@@ -335,12 +391,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setStage("Apply fixes", stageFailed)
 		}
-		m.fixSummary, m.fixFailed = fixOutcome(len(m.applying), m.dest, msg.err)
+		m.fixResult = fixOutcome(len(m.applying), m.dest, msg.err)
 		m.applying = nil
 		if m.quitting {
-			// The viewer that would render this banner is never drawn — carry it
-			// out so the agent's edits aren't reported by an empty screen.
-			m.exitNote = m.fixSummary
 			return m, tea.Quit
 		}
 		return m, waitFor(m.events)
@@ -458,7 +511,7 @@ func (m model) startFix() (tea.Model, tea.Cmd) {
 	m.applying = todo
 	m.phase = phaseFixing
 	m.activities = nil
-	m.fixSummary, m.fixFailed, m.fixErr = "", false, nil
+	m.fixResult, m.fixErr, m.fixRan = outcome{}, nil, true
 	m.start = time.Now()
 	m.setStage("Apply fixes", stageRunning)
 	return m, tea.Batch(m.spinner.Tick, tick())
@@ -467,6 +520,25 @@ func (m model) startFix() (tea.Model, tea.Cmd) {
 // pending is the set of findings the next apply would send to the agent.
 func (m model) pending() []int {
 	return pendingFixes(m.items, m.decisions, m.applied)
+}
+
+// reportExit writes what this session did to the user's files, in plain lines
+// that outlive the alt screen. Silent unless an apply actually ran — a
+// read-only review has nothing to report and shouldn't add noise to `run`.
+func (m model) reportExit(w io.Writer) {
+	if w == nil || !m.fixRan || m.fixResult.empty() {
+		return
+	}
+	fmt.Fprintf(w, "review-lens: %s\n", m.fixResult.headline)
+	// Iterate items, not the applied map, so the order matches the viewer.
+	for i, f := range m.items {
+		if m.applied[i] {
+			fmt.Fprintf(w, "review-lens:   - %s — %s\n", location(f), f.Title)
+		}
+	}
+	if m.fixResult.advice != "" {
+		fmt.Fprintf(w, "review-lens: %s\n", m.fixResult.advice)
+	}
 }
 
 // fixPrompt builds the instruction for the agent to fix the findings marked
@@ -482,11 +554,7 @@ func fixPrompt(dir string, items []findings.Finding, decisions map[int]decision,
 	b.WriteString("Apply fixes for the following code review findings. Edit files directly to fix the root cause, make the smallest change that resolves each, match the surrounding code style, and do not disable or suppress checks.\n\n")
 	for _, i := range pendingFixes(items, decisions, applied) {
 		f := items[i]
-		loc := f.File
-		if f.Line > 0 {
-			loc = fmt.Sprintf("%s:%d", f.File, f.Line)
-		}
-		fmt.Fprintf(&b, "- [%s] %s — %s\n", loc, f.Title, f.Detail)
+		fmt.Fprintf(&b, "- [%s] %s — %s\n", location(f), f.Title, f.Detail)
 	}
 	return b.String()
 }
@@ -727,16 +795,16 @@ func (m model) findingsBody() string {
 		head += selStyle.Render(fmt.Sprintf("   %d to fix", n))
 	}
 	b.WriteString(head + "\n")
-	if m.fixSummary != "" {
+	if !m.fixResult.empty() {
 		style := okStyle
-		if m.fixFailed {
+		if m.fixResult.failed {
 			style = errStyle
 		}
 		width := m.width - 2
 		if width < 20 {
 			width = 20
 		}
-		b.WriteString(style.Width(width).Render(m.fixSummary) + "\n")
+		b.WriteString(style.Width(width).Render(m.fixResult.banner()) + "\n")
 	}
 	if m.notice != "" {
 		b.WriteString(dimStyle.Render(m.notice) + "\n")
@@ -757,10 +825,7 @@ func (m model) findingsBody() string {
 	}
 
 	sel := m.items[m.cursor]
-	loc := sel.File
-	if sel.Line > 0 {
-		loc = fmt.Sprintf("%s:%d", sel.File, sel.Line)
-	}
+	loc := location(sel)
 	inner := m.width - 6
 	if inner < 20 {
 		inner = 20
