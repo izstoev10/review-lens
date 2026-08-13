@@ -8,6 +8,7 @@ package pipeline
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -97,19 +98,29 @@ func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) er
 	//    if it's enabled and can't run (no base branch, agent error), we fail
 	//    closed and refuse to push. Pushing + opening a PR with no review at all
 	//    would defeat the point of the gate.
+	var review *tui.Outcome
 	if cfg.Review && cfg.Agent != nil {
 		// Guidance is read from the real repo root (not the worktree) so edits
 		// take effect immediately, without needing to be committed first.
 		reviewGuidance := guidance.Load(root, cfg.ReviewGuidancePath)
-		if err := reviewDiff(wt, cfg, branch, reviewGuidance, interactive, log); err != nil {
+		outcome, err := reviewDiff(wt, cfg, branch, reviewGuidance, interactive, log)
+		if err != nil {
 			return fmt.Errorf("review could not run — refusing to push unreviewed: %w", err)
+		}
+		review = outcome
+		if review != nil {
+			if err := reviewGate(*review); err != nil {
+				return fmt.Errorf("refusing to push: %w", err)
+			}
 		}
 	}
 
 	// 4.5 An interactive review may have applied fixes in the worktree. Re-gate
 	//     them — the whole point of `run` is to push only green code — then commit
 	//     so they ride along in the push. A failed re-gate blocks the push.
-	if interactive {
+	//     Gated on the session having actually run an apply, so stray artifacts
+	//     left by the checks themselves never get committed as "review fixes".
+	if review != nil && review.FixRan {
 		if changed, err := wt.HasChanges(); err != nil {
 			return err
 		} else if changed {
@@ -278,24 +289,26 @@ func resolveBaseBranch(wt *gitx.Worktree, cfg config.Config) (string, error) {
 		strings.Join(tried, ", "))
 }
 
-func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance string, interactive bool, log io.Writer) error {
+// reviewDiff returns the interactive session's outcome (nil on the plain path
+// and the nothing-to-review early returns) so Run can judge push eligibility.
+func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance string, interactive bool, log io.Writer) (*tui.Outcome, error) {
 	base, err := resolveBaseBranch(wt, cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if base == branch {
 		// Running on the base branch itself — nothing to diff. Not an error: the
 		// caller may still legitimately push it (there's just no PR to review).
 		fmt.Fprintf(log, "review-lens: on base branch %q; nothing to review\n", base)
-		return nil
+		return nil, nil
 	}
 	diff, err := wt.DiffSince(base)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if diff == "" {
 		fmt.Fprintf(log, "review-lens: no changes vs %s to review\n", base)
-		return nil
+		return nil, nil
 	}
 	prompt := agent.ReviewPrompt(reviewGuidance, diff)
 
@@ -305,16 +318,39 @@ func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance str
 	// feed, then the same findings viewer.
 	if interactive {
 		fmt.Fprintf(log, "review-lens: reviewing changes vs %s...\n", base)
-		return tui.RunReview(wt.Path, cfg.Agent, prompt, "Reviewing changes vs "+base, tui.DestWorktree, log)
+		outcome, err := tui.RunReview(wt.Path, cfg.Agent, prompt, "Reviewing changes vs "+base, tui.DestWorktree, log)
+		if err != nil {
+			return nil, err
+		}
+		return &outcome, nil
 	}
 
 	fmt.Fprintf(log, "review-lens: reviewing changes vs %s...\n", base)
 	raw, err := agent.Review(wt.Path, cfg.Agent, prompt, log)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	fmt.Fprintln(log)
 	showReview(raw, log)
+	return nil, nil
+}
+
+// reviewGate decides whether a run may continue to push after an interactive
+// review session. Findings themselves stay advisory — what blocks the push is
+// a review that never completed (failed or stopped), or an apply that ended in
+// an unknown state, because either would mean pushing unreviewed or
+// half-edited code.
+func reviewGate(o tui.Outcome) error {
+	switch {
+	case errors.Is(o.ReviewErr, agent.ErrCanceled):
+		return fmt.Errorf("the review was stopped before it completed")
+	case o.ReviewErr != nil:
+		return fmt.Errorf("the review failed: %w", o.ReviewErr)
+	case errors.Is(o.FixErr, agent.ErrCanceled):
+		return fmt.Errorf("an apply was stopped mid-run — the worktree may hold partial edits")
+	case o.FixErr != nil:
+		return fmt.Errorf("the last apply failed — the worktree may hold partial edits: %w", o.FixErr)
+	}
 	return nil
 }
 

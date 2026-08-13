@@ -79,9 +79,47 @@ const (
 
 // --- entry points --------------------------------------------------------
 
-// RunReview streams a review live, then shows selectable findings. dest tells
-// the viewer where any applied fixes end up, so it can say what happens next.
-func RunReview(dir string, a *config.Agent, prompt, title string, dest Dest, out io.Writer) error {
+// Decision is the user's recorded choice for one finding, in the vocabulary
+// callers outside the TUI can act on.
+type Decision int
+
+const (
+	// DecisionPending: the user never resolved this finding.
+	DecisionPending Decision = iota
+	// DecisionFix: marked for an agent fix that has not been applied.
+	DecisionFix
+	// DecisionApplied: an agent fix for this finding completed.
+	DecisionApplied
+	// DecisionApprove: accepted as-is, no change wanted.
+	DecisionApprove
+	// DecisionSkip: set aside deliberately.
+	DecisionSkip
+)
+
+// Outcome is what an interactive review session concluded and what the user
+// decided — everything the caller needs to judge whether pushing is safe. The
+// alt screen dies with the session; this value is what survives it.
+type Outcome struct {
+	// Findings the review produced; Decisions is parallel to it.
+	Findings  []findings.Finding
+	Decisions []Decision
+	// ReviewErr is why the review itself produced nothing: the agent failed,
+	// or the user stopped it (agent.ErrCanceled). Nil for a completed review,
+	// even one with zero findings.
+	ReviewErr error
+	// FixRan records that at least one apply started; FixErr is the LAST
+	// apply's error (agent.ErrCanceled if the user quit mid-apply). A non-nil
+	// FixErr means the tree may hold partial edits from an interrupted agent.
+	FixRan bool
+	FixErr error
+}
+
+// RunReview streams a review live, then shows selectable findings, and returns
+// what the session concluded. dest tells the viewer where any applied fixes
+// end up, so it can say what happens next. The error covers only the UI
+// machinery — whether the *review* succeeded is Outcome.ReviewErr, so a
+// caller that pushes afterwards must check both.
+func RunReview(dir string, a *config.Agent, prompt, title string, dest Dest, out io.Writer) (Outcome, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -99,18 +137,20 @@ func RunReview(dir string, a *config.Agent, prompt, title string, dest Dest, out
 }
 
 // runProgram drives the UI and, once the alt screen is gone, leaves a durable
-// record of anything it changed on disk.
+// record of anything it changed on disk and returns the session's outcome.
 //
 // The viewer lives in the alt screen, which the terminal discards on exit — so
 // without this, *every* session that edited files ends at a clean prompt with
 // no trace of it. Quitting mid-apply is only the sharpest case, where the
 // banner is never even drawn.
-func runProgram(p *tea.Program, out io.Writer) error {
+func runProgram(p *tea.Program, out io.Writer) (Outcome, error) {
 	final, err := p.Run()
-	if m, ok := final.(model); ok {
-		m.reportExit(out)
+	m, ok := final.(model)
+	if !ok {
+		return Outcome{}, err
 	}
-	return err
+	m.reportExit(out)
+	return m.outcome(), err
 }
 
 // --- model ---------------------------------------------------------------
@@ -506,6 +546,34 @@ func (m model) startFix() (tea.Model, tea.Cmd) {
 // pending is the set of findings the next apply would send to the agent.
 func (m model) pending() []int {
 	return pendingFixes(m.items, m.decisions, m.applied)
+}
+
+// outcome condenses the final model into the value RunReview hands back. This
+// is the only bridge between the session and the caller: everything not
+// captured here is discarded with the alt screen.
+func (m model) outcome() Outcome {
+	decisions := make([]Decision, len(m.items))
+	for i := range m.items {
+		switch {
+		case m.applied[i]:
+			decisions[i] = DecisionApplied
+		case m.decisions[i] == decFix:
+			decisions[i] = DecisionFix
+		case m.decisions[i] == decApprove:
+			decisions[i] = DecisionApprove
+		case m.decisions[i] == decSkip:
+			decisions[i] = DecisionSkip
+		default:
+			decisions[i] = DecisionPending
+		}
+	}
+	return Outcome{
+		Findings:  m.items,
+		Decisions: decisions,
+		ReviewErr: m.err,
+		FixRan:    m.fixRan,
+		FixErr:    m.fixErr,
+	}
 }
 
 // reportExit writes what this session did to the user's files, in plain lines

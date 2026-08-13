@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -53,7 +54,21 @@ func ReviewPR(dir, number string, cfg config.Config, log io.Writer, interactive 
 	// — or a waiting state if it emits no events — then findings). Piped output
 	// gets the plain report. Same rules as `run`.
 	if interactive {
-		return tui.RunReview(dir, cfg.Agent, prompt, "Reviewing "+target, tui.DestWorkingTree, log)
+		outcome, err := tui.RunReview(dir, cfg.Agent, prompt, "Reviewing "+target, tui.DestWorkingTree, log)
+		if err != nil {
+			return err
+		}
+		// `pr` is read-only, so a stopped review is the user's call and not an
+		// error — but a review that *failed* must exit non-zero, not vanish with
+		// the alt screen.
+		switch {
+		case errors.Is(outcome.ReviewErr, agent.ErrCanceled):
+			fmt.Fprintln(log, "review-lens: review stopped")
+			return nil
+		case outcome.ReviewErr != nil:
+			return fmt.Errorf("review failed: %w", outcome.ReviewErr)
+		}
+		return nil
 	}
 
 	fmt.Fprintf(log, "review-lens: reviewing %s...\n", target)
