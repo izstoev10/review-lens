@@ -92,3 +92,23 @@ func TestCleanSessionHasCleanOutcome(t *testing.T) {
 		t.Error("the session's findings should cross the seam")
 	}
 }
+
+// A non-interactive review has nobody to decide: ask-user findings must reach
+// the caller's gate as pending, while auto-fix and no-op take their defaults.
+func TestUnattendedOutcomeKeepsAskUserPending(t *testing.T) {
+	o := UnattendedOutcome([]findings.Finding{
+		{Action: findings.AskUser},
+		{Action: findings.AutoFix},
+		{Action: findings.NoOp},
+	})
+
+	want := []Decision{DecisionPending, DecisionFix, DecisionSkip}
+	for i, w := range want {
+		if o.Decisions[i] != w {
+			t.Errorf("decision %d = %v, want %v", i, o.Decisions[i], w)
+		}
+	}
+	if o.ReviewErr != nil || o.FixRan {
+		t.Errorf("outcome = %+v, want a plain completed-review shape", o)
+	}
+}

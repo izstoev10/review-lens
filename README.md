@@ -164,10 +164,13 @@ feed, then the same findings viewer.
 - **agent** is optional. Its command is invoked inside the worktree with the
   prompt appended as the final argument (`claude -p "<prompt>"`). Set to `null`
   to only report failures instead of fixing/reviewing.
-- **review** (advisory): after checks pass, the agent reviews this branch's diff
-  against **baseBranch** and prints findings. Findings never block the push — but
-  if the review is enabled and can't *run* (no base branch resolves, agent
-  error), the run stops rather than push unreviewed. **baseBranch** is resolved
+- **review**: after checks pass, the agent reviews this branch's diff against
+  **baseBranch**. Auto-fix and no-op findings are advisory; **ask-user findings
+  are decision points** — the run refuses to push until each is fixed, approved,
+  or skipped in the interactive viewer, and a non-interactive run with any
+  ask-user finding stops before the push with a summary and instructions. If the
+  review is enabled and can't *run* at all (no base branch resolves, agent
+  error, review quit mid-way), the run also stops rather than push unreviewed. **baseBranch** is resolved
   as configured → `main` → `master` (local or `origin/…`), so a `master` repo
   just works.
 - **reviewGuidancePath** points to the editable review-criteria file (see below).

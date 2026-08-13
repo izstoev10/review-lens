@@ -548,28 +548,58 @@ func (m model) pending() []int {
 	return pendingFixes(m.items, m.decisions, m.applied)
 }
 
+// undecided counts the ask-user findings still waiting for a human choice.
+// These are the decision points of the session: a `run` will not push while
+// any remain, so the viewer keeps the count in front of the user.
+func (m model) undecided() int {
+	n := 0
+	for i, f := range m.items {
+		if f.Action == findings.AskUser && m.decisions[i] == decPending {
+			n++
+		}
+	}
+	return n
+}
+
+// exportDecisions translates the viewer's per-finding state into the exported
+// vocabulary, with an applied fix outranking the decision that requested it.
+func exportDecisions(items []findings.Finding, decisions map[int]decision, applied map[int]bool) []Decision {
+	out := make([]Decision, len(items))
+	for i := range items {
+		switch {
+		case applied[i]:
+			out[i] = DecisionApplied
+		case decisions[i] == decFix:
+			out[i] = DecisionFix
+		case decisions[i] == decApprove:
+			out[i] = DecisionApprove
+		case decisions[i] == decSkip:
+			out[i] = DecisionSkip
+		default:
+			out[i] = DecisionPending
+		}
+	}
+	return out
+}
+
+// UnattendedOutcome is what a review concludes when nobody is at the keyboard:
+// every finding takes its default decision, so ask-user findings stay pending —
+// a non-interactive run cannot resolve judgement calls, and the caller's push
+// gate must see that honestly.
+func UnattendedOutcome(items []findings.Finding) Outcome {
+	return Outcome{
+		Findings:  items,
+		Decisions: exportDecisions(items, defaultDecisions(items), nil),
+	}
+}
+
 // outcome condenses the final model into the value RunReview hands back. This
 // is the only bridge between the session and the caller: everything not
 // captured here is discarded with the alt screen.
 func (m model) outcome() Outcome {
-	decisions := make([]Decision, len(m.items))
-	for i := range m.items {
-		switch {
-		case m.applied[i]:
-			decisions[i] = DecisionApplied
-		case m.decisions[i] == decFix:
-			decisions[i] = DecisionFix
-		case m.decisions[i] == decApprove:
-			decisions[i] = DecisionApprove
-		case m.decisions[i] == decSkip:
-			decisions[i] = DecisionSkip
-		default:
-			decisions[i] = DecisionPending
-		}
-	}
 	return Outcome{
 		Findings:  m.items,
-		Decisions: decisions,
+		Decisions: exportDecisions(m.items, m.decisions, m.applied),
 		ReviewErr: m.err,
 		FixRan:    m.fixRan,
 		FixErr:    m.fixErr,
@@ -665,8 +695,10 @@ func sevStyle(s findings.Severity) lipgloss.Style {
 
 // decisionGlyph renders a finding's state as a compact marker. An applied fix
 // outranks the chosen action: what the agent actually did is more useful to see
-// than what was asked for.
-func decisionGlyph(d decision, applied bool) string {
+// than what was asked for. An undecided ask-user finding gets a demanding "?"
+// rather than a blank — it is a decision point the run will wait on, not an
+// absence of one.
+func decisionGlyph(d decision, applied bool, action findings.Action) string {
 	if applied {
 		return okStyle.Render("[done]")
 	}
@@ -678,6 +710,9 @@ func decisionGlyph(d decision, applied bool) string {
 	case decSkip:
 		return dimStyle.Render("[skip]")
 	default:
+		if action == findings.AskUser {
+			return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("11")).Render("[ ?  ]")
+		}
 		return dimStyle.Render("[    ]")
 	}
 }
@@ -848,6 +883,10 @@ func (m model) findingsBody() string {
 	if n := len(m.pending()); n > 0 {
 		head += selStyle.Render(fmt.Sprintf("   %d to fix", n))
 	}
+	if n := m.undecided(); n > 0 {
+		head += lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("11")).
+			Render(fmt.Sprintf("   %d to decide", n))
+	}
 	b.WriteString(head + "\n")
 	if !m.fixResult.empty() {
 		style := okStyle
@@ -875,7 +914,7 @@ func (m model) findingsBody() string {
 			title = titleStyle.Render(title)
 		}
 		act := actionStyle(f.Action).Render(fmt.Sprintf("%-8s", f.Action))
-		fmt.Fprintf(&b, "%s%s %s %s  %s\n", marker, decisionGlyph(m.decisions[idx], m.applied[idx]), sevStyle(f.Severity).Render(sevLabel(f.Severity)), act, clip(title, m.width-28))
+		fmt.Fprintf(&b, "%s%s %s %s  %s\n", marker, decisionGlyph(m.decisions[idx], m.applied[idx], f.Action), sevStyle(f.Severity).Render(sevLabel(f.Severity)), act, clip(title, m.width-28))
 	}
 
 	sel := m.items[m.cursor]
@@ -902,9 +941,15 @@ func (m model) footer() string {
 			return "q quit"
 		}
 		if m.agentCfg != nil {
+			keys := "j/k move · f mark fix · a approve · s skip · A all · N none · c copy · enter apply marked (edits files) · q quit"
 			// "f" marks a finding; "enter" applies (runs the agent on) everything
-			// marked — the labels spell out that mark-vs-apply distinction.
-			return "j/k move · f mark fix · a approve · s skip · A all · N none · c copy · enter apply marked (edits files) · q quit"
+			// marked — the labels spell out that mark-vs-apply distinction. While
+			// ask-user findings are undecided, the footer says what's at stake:
+			// the run stops before push until each has a decision.
+			if n := m.undecided(); n > 0 && m.dest == DestWorktree {
+				return fmt.Sprintf("decide %d ask-user finding(s) — the run won't push until each is fixed, approved, or skipped\n", n) + keys
+			}
+			return keys
 		}
 		return "j/k move · c copy · q quit"
 	default:
