@@ -85,6 +85,7 @@ var adapters = []adapter{
 	{"mix.exs", proposeElixir},
 	{"Cargo.toml", proposeRust},
 	{"pyproject.toml", proposePython},
+	{"Makefile", proposeMake},
 }
 
 // Discover walks the tracked manifests and returns the proposed gate, plus
@@ -133,17 +134,24 @@ func projectDirs(r Repo) []string {
 	return dirs
 }
 
-// dedupe drops proposals whose directory and argv repeat an earlier one — two
-// CI workflows invoking the same make target should propose it once.
+// dedupe collapses proposals whose directory and argv repeat an earlier one —
+// two CI workflows invoking the same make target should propose it once. The
+// first occurrence keeps its position, but a later high-confidence duplicate
+// upgrades it: a plain CI step must never shadow the same command proposed
+// with confidence by an adapter, or a non-interactive run would reject a gate
+// it should have accepted.
 func dedupe(ps []Proposal) []Proposal {
-	seen := map[string]bool{}
+	at := map[string]int{}
 	var out []Proposal
 	for _, p := range ps {
 		key := p.Check.Dir + "\x00" + strings.Join(p.Check.Cmd, "\x00")
-		if seen[key] {
+		if i, dup := at[key]; dup {
+			if p.HighConfidence && !out[i].HighConfidence {
+				out[i] = p // the confident proposal wins, in the earlier slot
+			}
 			continue
 		}
-		seen[key] = true
+		at[key] = len(out)
 		out = append(out, p)
 	}
 	return out
@@ -214,6 +222,23 @@ func proposeRust(r Repo, dir string) []Proposal {
 		{Check: config.Check{Name: "build", Cmd: []string{"cargo", "build"}, Dir: dir}, HighConfidence: ok, Source: src},
 		{Check: config.Check{Name: "test", Cmd: []string{"cargo", "test"}, Dir: dir}, HighConfidence: ok, Source: src},
 	}
+}
+
+// proposeMake offers the project's own gate target when the Makefile declares
+// one, preferring the canonical names. This keeps Makefile-only repos (no CI
+// workflow to reveal the gate) discoverable.
+func proposeMake(r Repo, dir string) []Proposal {
+	src := filepath.Join(dir, "Makefile")
+	for _, target := range []string{"ci", "check", "test"} {
+		if makefileTarget(r, src, target) {
+			return []Proposal{{
+				Check:          config.Check{Name: "make " + target, Cmd: []string{"make", target}, Dir: dir},
+				HighConfidence: r.installed("make"),
+				Source:         src,
+			}}
+		}
+	}
+	return nil
 }
 
 // proposePython's tools aren't implied by the manifest the way go/cargo are,

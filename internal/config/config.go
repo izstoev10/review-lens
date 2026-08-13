@@ -80,8 +80,8 @@ type Config struct {
 }
 
 // Default returns a language-agnostic starting config with placeholder checks.
-// `gate init` normally calls Detect instead, which fills in checks based on what
-// it finds in the repo; Default is the fallback and the base for Load.
+// `init` and `configure` replace the checks via discovery (internal/discover);
+// Default is the base for Load, so partial config files still work.
 func Default() Config {
 	return Config{
 		Remote: "origin",

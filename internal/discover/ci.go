@@ -3,25 +3,31 @@ package discover
 import (
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/izstoev10/review-lens/internal/config"
 )
 
-// CI workflows are evidence of the intended gate, but not a safe source of
-// truth: they may lean on actions, services, matrices, secrets and runner
-// state that don't exist locally. inspectCI therefore extracts only what is
-// honestly reproducible — a repository-owned gate command the workflow invokes
-// (make ci, scripts/check), plus plain single-line shell steps as low-
-// confidence candidates — and names the unsupported features instead of
-// guessing at them.
-
 var (
 	runLine = regexp.MustCompile(`(?m)^\s*(?:-\s+)?run:\s*(.+?)\s*$`)
-	// Features a workflow can use that have no faithful local equivalent.
-	unsupported = []string{"uses:", "services:", "container:", "strategy:"}
+	// Features a workflow can use that have no faithful local equivalent, each
+	// matched at the start of a YAML line (optionally as a list item).
+	unsupported = map[string]*regexp.Regexp{
+		"uses":      regexp.MustCompile(`(?m)^\s*(?:-\s+)?uses:`),
+		"services":  regexp.MustCompile(`(?m)^\s*(?:-\s+)?services:`),
+		"container": regexp.MustCompile(`(?m)^\s*(?:-\s+)?container:`),
+		"strategy":  regexp.MustCompile(`(?m)^\s*(?:-\s+)?strategy:`),
+	}
 )
 
+// inspectCI mines the tracked GitHub workflows for gate evidence. Workflows
+// are not a safe source of truth — they may lean on actions, services,
+// matrices, secrets and runner state that don't exist locally — so it extracts
+// only what is honestly reproducible: a repository-owned gate command the
+// workflow invokes (make ci, scripts/check) with confidence, plain single-line
+// shell steps as low-confidence candidates, and a note naming each unsupported
+// feature instead of guessing at it.
 func inspectCI(r Repo) (proposals []Proposal, notes []string) {
 	for _, path := range r.Tracked {
 		dir := filepath.Dir(path)
@@ -56,11 +62,12 @@ func inspectCI(r Repo) (proposals []Proposal, notes []string) {
 
 func unsupportedFeatures(content string) []string {
 	var feats []string
-	for _, f := range unsupported {
-		if regexp.MustCompile(`(?m)^\s*(?:-\s+)?` + f).MatchString(content) {
-			feats = append(feats, strings.TrimSuffix(f, ":"))
+	for name, re := range unsupported {
+		if re.MatchString(content) {
+			feats = append(feats, name)
 		}
 	}
+	sort.Strings(feats)
 	return feats
 }
 
@@ -74,7 +81,7 @@ func repoOwnedGate(r Repo, cmd, source string) (Proposal, bool) {
 	}
 
 	// make <target>, where the root Makefile defines <target>.
-	if argv[0] == "make" && len(argv) == 2 && makefileTarget(r, argv[1]) {
+	if argv[0] == "make" && len(argv) == 2 && makefileTarget(r, "Makefile", argv[1]) {
 		return Proposal{
 			Check:          proposalCheck("make "+argv[1], cmd),
 			HighConfidence: r.installed("make"),
@@ -100,9 +107,9 @@ func repoOwnedGate(r Repo, cmd, source string) (Proposal, bool) {
 	return Proposal{}, false
 }
 
-// makefileTarget reports whether the root Makefile declares target.
-func makefileTarget(r Repo, target string) bool {
-	content := r.read("Makefile")
+// makefileTarget reports whether the tracked Makefile at path declares target.
+func makefileTarget(r Repo, path, target string) bool {
+	content := r.read(path)
 	if content == "" {
 		return false
 	}
