@@ -1,10 +1,8 @@
 package pipeline
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +11,7 @@ import (
 	"github.com/izstoev10/review-lens/internal/ci"
 	"github.com/izstoev10/review-lens/internal/config"
 	"github.com/izstoev10/review-lens/internal/findings"
+	"github.com/izstoev10/review-lens/internal/gh"
 	"github.com/izstoev10/review-lens/internal/gitx"
 	"github.com/izstoev10/review-lens/internal/guidance"
 )
@@ -84,8 +83,8 @@ func AutoFixLoop(dir, prNumber string, cfg config.Config, log io.Writer) error {
 	if cfg.Agent == nil {
 		return fmt.Errorf("no agent configured (set \"agent\" in .review-lens.json)")
 	}
-	if _, err := exec.LookPath("gh"); err != nil {
-		return fmt.Errorf("the GitHub CLI (gh) is required for the auto-fix loop")
+	if err := gh.Available(); err != nil {
+		return err
 	}
 	root, err := gitx.RepoRoot(dir)
 	if err != nil {
@@ -137,7 +136,7 @@ func AutoFixLoop(dir, prNumber string, cfg config.Config, log io.Writer) error {
 		fmt.Fprintf(log, "\nreview-lens: ═══ iteration %d/%d ═══\n", attempt, maxIter)
 
 		// 1. Review the PR diff.
-		diff, err := ghPRDiff(wt.Path, number)
+		diff, err := gh.Client{Dir: wt.Path}.Diff(number)
 		if err != nil {
 			return err
 		}
@@ -155,7 +154,7 @@ func AutoFixLoop(dir, prNumber string, cfg config.Config, log io.Writer) error {
 		status := ci.Pending
 		if len(autoFix) == 0 {
 			fmt.Fprintln(log, "review-lens: checking CI…")
-			s, failing, err := ci.Poll(wt.Path, number, ciPollInterval, ciPollTimeout,
+			s, failing, err := ci.Poll(gh.Client{Dir: wt.Path}, number, ciPollInterval, ciPollTimeout,
 				func(msg string) { fmt.Fprintf(log, "review-lens: %s\n", msg) })
 			if err != nil {
 				fmt.Fprintf(log, "review-lens: CI: %v\n", err)
@@ -212,35 +211,21 @@ func AutoFixLoop(dir, prNumber string, cfg config.Config, log io.Writer) error {
 	return nil
 }
 
-// resolvePR resolves the target PR's number and head branch via the gh CLI,
-// running in the user's real checkout. An empty prNumber means "the PR of the
-// current branch"; a non-empty one is looked up directly. Resolving both up
-// front lets the loop pin itself to one PR/branch and pass an explicit number to
-// every later gh/CI call (which otherwise infer the PR from the current branch —
+// resolvePR resolves the target PR's number and head branch, running in the
+// user's real checkout. An empty prNumber means "the PR of the current
+// branch"; a non-empty one is looked up directly. Resolving both up front lets
+// the loop pin itself to one PR/branch and pass an explicit number to every
+// later gh/CI call (which otherwise infer the PR from the current branch —
 // impossible from the detached worktree the loop runs in).
 func resolvePR(dir, prNumber string) (number, branch string, err error) {
-	args := []string{"pr", "view"}
-	if prNumber != "" {
-		args = append(args, prNumber)
-	}
-	args = append(args, "--json", "number,headRefName")
-	cmd := exec.Command("gh", args...)
-	cmd.Dir = dir
-	out, err := cmd.Output()
+	pr, err := gh.Client{Dir: dir}.View(prNumber)
 	if err != nil {
-		return "", "", fmt.Errorf("gh pr view failed (is there an open PR for this branch?): %w", err)
+		return "", "", err
 	}
-	var p struct {
-		Number      int    `json:"number"`
-		HeadRefName string `json:"headRefName"`
-	}
-	if err := json.Unmarshal(out, &p); err != nil {
-		return "", "", fmt.Errorf("parsing gh pr view: %w", err)
-	}
-	if p.HeadRefName == "" {
+	if pr.HeadRef == "" {
 		return "", "", fmt.Errorf("could not determine the PR's head branch")
 	}
-	return strconv.Itoa(p.Number), p.HeadRefName, nil
+	return strconv.Itoa(pr.Number), pr.HeadRef, nil
 }
 
 // autoFixPrompt asks the agent to fix a set of auto-fixable findings.

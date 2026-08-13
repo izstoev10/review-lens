@@ -4,11 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 
 	"github.com/izstoev10/review-lens/internal/agent"
 	"github.com/izstoev10/review-lens/internal/config"
+	"github.com/izstoev10/review-lens/internal/gh"
 	"github.com/izstoev10/review-lens/internal/gitx"
 	"github.com/izstoev10/review-lens/internal/guidance"
 	"github.com/izstoev10/review-lens/internal/tui"
@@ -25,11 +25,11 @@ func ReviewPR(dir, number string, cfg config.Config, log io.Writer, interactive 
 	if cfg.Agent == nil {
 		return fmt.Errorf("no agent configured (set \"agent\" in .review-lens.json)")
 	}
-	if _, err := exec.LookPath("gh"); err != nil {
-		return fmt.Errorf("the GitHub CLI (gh) is required for PR review; install it and run `gh auth login`")
+	if err := gh.Available(); err != nil {
+		return err
 	}
 
-	diff, err := ghPRDiff(dir, number)
+	diff, err := gh.Client{Dir: dir}.Diff(number)
 	if err != nil {
 		return err
 	}
@@ -79,20 +79,4 @@ func ReviewPR(dir, number string, cfg config.Config, log io.Writer, interactive 
 	fmt.Fprintln(log)
 	showReview(raw, log)
 	return nil
-}
-
-// ghPRDiff returns the unified diff of a PR via the GitHub CLI. An empty number
-// means "the PR associated with the current branch".
-func ghPRDiff(dir, number string) (string, error) {
-	args := []string{"pr", "diff"}
-	if number != "" {
-		args = append(args, number)
-	}
-	cmd := exec.Command("gh", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("gh pr diff failed (is there an open PR for this branch?): %w\n%s", err, out)
-	}
-	return string(out), nil
 }

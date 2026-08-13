@@ -1,14 +1,14 @@
-// Package ci reads GitHub CI status for a pull request via the gh CLI, so the
-// auto-fix loop can wait for checks to go green (or catch them going red).
+// Package ci reads GitHub CI status for a pull request, so the auto-fix loop
+// can wait for checks to go green (or catch them going red).
 package ci
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/izstoev10/review-lens/internal/gh"
 )
 
 // Status is the overall conclusion of a PR's checks.
@@ -31,18 +31,10 @@ func (s Status) String() string {
 	}
 }
 
-// checkRun is one entry of GitHub's statusCheckRollup.
-type checkRun struct {
-	Name       string `json:"name"`
-	Status     string `json:"status"`     // QUEUED | IN_PROGRESS | COMPLETED (checks) or "" (statuses)
-	Conclusion string `json:"conclusion"` // SUCCESS | FAILURE | ... (checks)
-	State      string `json:"state"`      // SUCCESS | FAILURE | PENDING (legacy commit statuses)
-}
-
 // classifyRollup reduces a set of check runs to a single Status. Pure function,
 // unit-tested. A failure anywhere wins; otherwise any still-running check keeps
 // it pending; an empty set is treated as success (nothing gates the PR).
-func classifyRollup(runs []checkRun) (Status, []string) {
+func classifyRollup(runs []gh.CheckRun) (Status, []string) {
 	var failing []string
 	pending := false
 	for _, r := range runs {
@@ -68,35 +60,22 @@ func classifyRollup(runs []checkRun) (Status, []string) {
 }
 
 // Query returns the current CI status for a PR (empty prNumber = current branch).
-func Query(dir, prNumber string) (Status, []string, error) {
-	args := []string{"pr", "view"}
-	if prNumber != "" {
-		args = append(args, prNumber)
-	}
-	args = append(args, "--json", "statusCheckRollup")
-	cmd := exec.Command("gh", args...)
-	cmd.Dir = dir
-	out, err := cmd.Output()
+func Query(c gh.Client, prNumber string) (Status, []string, error) {
+	runs, err := c.CheckRollup(prNumber)
 	if err != nil {
-		return Pending, nil, fmt.Errorf("gh pr view failed: %w", err)
+		return Pending, nil, err
 	}
-	var payload struct {
-		StatusCheckRollup []checkRun `json:"statusCheckRollup"`
-	}
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return Pending, nil, fmt.Errorf("parsing statusCheckRollup: %w", err)
-	}
-	status, failing := classifyRollup(payload.StatusCheckRollup)
+	status, failing := classifyRollup(runs)
 	return status, failing, nil
 }
 
 // Poll queries CI repeatedly until it is conclusive (Success/Failure) or the
 // timeout elapses. progress is called with each intermediate status line.
-func Poll(dir, prNumber string, interval, timeout time.Duration, progress func(string)) (Status, []string, error) {
+func Poll(c gh.Client, prNumber string, interval, timeout time.Duration, progress func(string)) (Status, []string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	for {
-		status, failing, err := Query(dir, prNumber)
+		status, failing, err := Query(c, prNumber)
 		if err != nil {
 			return Pending, nil, err
 		}
