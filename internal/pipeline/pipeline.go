@@ -7,20 +7,19 @@
 package pipeline
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/izstoev10/review-lens/internal/agent"
 	"github.com/izstoev10/review-lens/internal/checks"
 	"github.com/izstoev10/review-lens/internal/config"
 	"github.com/izstoev10/review-lens/internal/findings"
+	"github.com/izstoev10/review-lens/internal/gh"
 	"github.com/izstoev10/review-lens/internal/gitx"
 	"github.com/izstoev10/review-lens/internal/guidance"
 	"github.com/izstoev10/review-lens/internal/signature"
@@ -149,7 +148,7 @@ func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) er
 	// 6. Optionally open a PR via the gh CLI, building the body and stamping the
 	//    gate signature.
 	if cfg.OpenPR {
-		if err := openPR(wt, cfg, branch, log); err != nil {
+		if err := openPR(gh.Client{Dir: wt.Path}, wt, cfg, branch, log); err != nil {
 			fmt.Fprintf(log, "review-lens: PR step skipped: %v\n", err)
 		}
 	}
@@ -366,36 +365,28 @@ func showReview(raw string, log io.Writer) {
 	findings.Render(log, list, true)
 }
 
-// openPR shells out to the GitHub CLI to open a PR for branch, then finalizes
-// its title and body. It's best-effort: if gh isn't installed we bail; if a PR
-// already exists `gh pr create` fails harmlessly and finalizePR still runs (so
-// re-running review-lens back-fills the gate signature on an existing PR).
+// openPR opens a PR for branch via the PR client, then finalizes its title and
+// body. It's best-effort: if gh isn't installed we bail; if a PR already
+// exists Create fails harmlessly and finalizePR still runs (so re-running
+// review-lens back-fills the gate signature on an existing PR).
 //
 // The head branch is passed explicitly because the worktree runs with a detached
 // HEAD, so gh can't infer "the current branch".
-func openPR(wt *gitx.Worktree, cfg config.Config, branch string, log io.Writer) error {
-	if _, err := exec.LookPath("gh"); err != nil {
-		return fmt.Errorf("gh not installed")
+func openPR(c gh.Client, wt *gitx.Worktree, cfg config.Config, branch string, log io.Writer) error {
+	if c.Exec == nil {
+		if err := gh.Available(); err != nil {
+			return err
+		}
 	}
-	cmd := exec.Command("gh", "pr", "create", "--fill", "--head", branch)
-	cmd.Dir = wt.Path
-	out, err := cmd.CombinedOutput()
-	created := err == nil
+	created, message := c.Create(branch)
 	if created {
-		fmt.Fprintf(log, "review-lens: %s", out)
+		fmt.Fprintf(log, "review-lens: %s\n", message)
 	} else {
 		// Most commonly: a PR already exists for this branch. Not fatal — we still
 		// finalize (ensure the signature) below.
-		fmt.Fprintf(log, "review-lens: gh pr create: %s\n", strings.TrimSpace(string(out)))
+		fmt.Fprintf(log, "review-lens: gh pr create: %s\n", message)
 	}
-	return finalizePR(wt, cfg, branch, created, log)
-}
-
-// prInfo is the subset of a PR's metadata we read and rewrite.
-type prInfo struct {
-	Number int    `json:"number"`
-	Body   string `json:"body"`
-	Title  string `json:"title"`
+	return finalizePR(c, wt, cfg, branch, created, log)
 }
 
 // finalizePR sets the PR's title/body and always ensures the gate signature.
@@ -407,8 +398,8 @@ type prInfo struct {
 // a clickable "Jira:" link. On a re-run against an existing PR (created=false)
 // it only back-fills the signature — never clobbering a body or title a human
 // may have edited.
-func finalizePR(wt *gitx.Worktree, cfg config.Config, branch string, created bool, log io.Writer) error {
-	pr, err := prForBranch(wt.Path, branch)
+func finalizePR(c gh.Client, wt *gitx.Worktree, cfg config.Config, branch string, created bool, log io.Writer) error {
+	pr, err := c.OpenFor(branch)
 	if err != nil {
 		return err
 	}
@@ -436,21 +427,13 @@ func finalizePR(wt *gitx.Worktree, cfg config.Config, branch string, created boo
 	}
 	newBody, _ = signature.Ensure(newBody)
 
-	args := []string{"pr", "edit", strconv.Itoa(pr.Number)}
-	if newTitle != pr.Title {
-		args = append(args, "--title", newTitle)
+	changed, err := c.Edit(pr, newTitle, newBody)
+	if err != nil {
+		return err
 	}
-	if newBody != pr.Body {
-		args = append(args, "--body", newBody)
-	}
-	if len(args) == 3 { // nothing to change
+	if !changed {
 		fmt.Fprintf(log, "review-lens: PR #%d already up to date\n", pr.Number)
 		return nil
-	}
-	edit := exec.Command("gh", args...)
-	edit.Dir = wt.Path
-	if eout, err := edit.CombinedOutput(); err != nil {
-		return fmt.Errorf("updating PR #%d: %w\n%s", pr.Number, err, eout)
 	}
 	fmt.Fprintf(log, "review-lens: finalized PR #%d\n", pr.Number)
 	return nil
@@ -481,25 +464,6 @@ func fillPRTemplate(wt *gitx.Worktree, cfg config.Config, tmpl string, log io.Wr
 		return "", fmt.Errorf("agent returned an empty body")
 	}
 	return body, nil
-}
-
-// prForBranch returns the open PR for branch via the gh CLI. Uses --head (not
-// branch inference) so it works from the detached worktree.
-func prForBranch(dir, branch string) (prInfo, error) {
-	list := exec.Command("gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number,body,title")
-	list.Dir = dir
-	out, err := list.Output()
-	if err != nil {
-		return prInfo{}, fmt.Errorf("looking up PR: %w", err)
-	}
-	var prs []prInfo
-	if err := json.Unmarshal(out, &prs); err != nil {
-		return prInfo{}, fmt.Errorf("parsing gh pr list: %w", err)
-	}
-	if len(prs) == 0 {
-		return prInfo{}, fmt.Errorf("no open PR found for branch %q", branch)
-	}
-	return prs[0], nil
 }
 
 func short(sha string) string {

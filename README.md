@@ -263,6 +263,7 @@ internal/discover       propose checks from tracked manifests + CI workflows
 internal/guidance       load editable review criteria (fallback to default)
 internal/agent          build prompt + invoke the agent CLI
 internal/findings       parse + render structured review findings
+internal/gh             the one owner of GitHub CLI execution (PR client)
 internal/ci             read GitHub CI status via gh (for the auto-fix loop)
 internal/signature      the PR gate signature (stamp + marker)
 internal/tui            interactive review/run terminal UI
