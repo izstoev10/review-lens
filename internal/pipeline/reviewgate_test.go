@@ -47,6 +47,40 @@ func TestReviewGate(t *testing.T) {
 			outcome: tui.Outcome{FixRan: true, FixErr: errors.New("agent died")},
 			block:   "partial edits",
 		},
+		{
+			name: "an undecided ask-user finding blocks and is named",
+			outcome: tui.Outcome{
+				Findings: []findings.Finding{
+					{Action: findings.AskUser, File: "api.go", Line: 12, Title: "breaking change?"},
+				},
+				Decisions: []tui.Decision{tui.DecisionPending},
+			},
+			block: "api.go:12",
+		},
+		{
+			name: "an ask-user fix marked but never applied still blocks",
+			outcome: tui.Outcome{
+				Findings:  []findings.Finding{{Action: findings.AskUser, File: "a.go", Title: "t"}},
+				Decisions: []tui.Decision{tui.DecisionFix},
+			},
+			block: "need a decision",
+		},
+		{
+			name: "resolved ask-user findings push — applied, approved, skipped all count",
+			outcome: tui.Outcome{
+				Findings: []findings.Finding{
+					{Action: findings.AskUser}, {Action: findings.AskUser}, {Action: findings.AskUser},
+				},
+				Decisions: []tui.Decision{tui.DecisionApplied, tui.DecisionApprove, tui.DecisionSkip},
+			},
+		},
+		{
+			name: "undecided auto-fix and no-op findings stay advisory",
+			outcome: tui.Outcome{
+				Findings:  []findings.Finding{{Action: findings.AutoFix}, {Action: findings.NoOp}},
+				Decisions: []tui.Decision{tui.DecisionFix, tui.DecisionSkip},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

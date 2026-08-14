@@ -57,8 +57,9 @@ type Config struct {
 	// before it stops for human review. Defaults to 3 when unset.
 	MaxLoopIterations int `json:"maxLoopIterations"`
 	// Review, when true, has the agent review the branch's diff and print
-	// findings just before pushing. Findings are advisory — they do not block
-	// the push (the checks are the gate).
+	// findings just before pushing. Auto-fix and no-op findings are advisory;
+	// ask-user findings are decision points — the run refuses to push until
+	// each is fixed, approved, or skipped by a human.
 	Review bool `json:"review"`
 	// BaseBranch is what the review diffs against, e.g. "main". The review
 	// covers commits on the current branch since it diverged from BaseBranch.

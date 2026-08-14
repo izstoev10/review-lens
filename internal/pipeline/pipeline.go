@@ -330,15 +330,21 @@ func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance str
 		return nil, err
 	}
 	fmt.Fprintln(log)
-	showReview(raw, log)
-	return nil, nil
+	list := showReview(raw, log)
+	if list == nil {
+		return nil, nil
+	}
+	// Unattended, nobody can decide — ask-user findings stay pending in the
+	// outcome, and the same gate that guards an interactive run guards this one.
+	outcome := tui.UnattendedOutcome(list)
+	return &outcome, nil
 }
 
-// reviewGate decides whether a run may continue to push after an interactive
-// review session. Findings themselves stay advisory — what blocks the push is
-// a review that never completed (failed or stopped), or an apply that ended in
-// an unknown state, because either would mean pushing unreviewed or
-// half-edited code.
+// reviewGate decides whether a run may continue to push after a review.
+// Auto-fix and no-op findings stay advisory — what blocks the push is a review
+// that never completed (failed or stopped), an apply that ended in an unknown
+// state, or an ask-user finding nobody decided: each would mean pushing
+// unreviewed, half-edited, or unjudged code.
 func reviewGate(o tui.Outcome) error {
 	switch {
 	case errors.Is(o.ReviewErr, agent.ErrCanceled):
@@ -350,19 +356,62 @@ func reviewGate(o tui.Outcome) error {
 	case o.FixErr != nil:
 		return fmt.Errorf("the last apply failed — the worktree may hold partial edits: %w", o.FixErr)
 	}
+	if un := unresolvedAskUser(o); len(un) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s need a decision before this branch can be pushed:\n", plural(len(un), "ask-user finding"))
+		for _, f := range un {
+			loc := f.File
+			if f.Line > 0 {
+				loc = fmt.Sprintf("%s:%d", f.File, f.Line)
+			}
+			fmt.Fprintf(&b, "  - %s — %s\n", loc, f.Title)
+		}
+		b.WriteString("rerun `review-lens run` in a terminal and fix, approve, or skip each (a fix must also be applied)")
+		return errors.New(b.String())
+	}
 	return nil
 }
 
+// unresolvedAskUser lists the ask-user findings the session left undecided.
+// A fix that was marked but never applied is still unresolved — the intent
+// was recorded, the judgement wasn't carried out. Auto-fix and no-op findings
+// never appear here, whatever their decision state.
+func unresolvedAskUser(o tui.Outcome) []findings.Finding {
+	var un []findings.Finding
+	for i, f := range o.Findings {
+		if f.Action != findings.AskUser {
+			continue
+		}
+		resolved := i < len(o.Decisions) &&
+			(o.Decisions[i] == tui.DecisionApplied ||
+				o.Decisions[i] == tui.DecisionApprove ||
+				o.Decisions[i] == tui.DecisionSkip)
+		if !resolved {
+			un = append(un, f)
+		}
+	}
+	return un
+}
+
+func plural(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
+}
+
 // showReview prints an agent's raw review output as the compact colourised
-// report. Output that isn't a findings array gets a bounded excerpt — never
-// the whole response, which on a broken run can be an entire transcript.
-func showReview(raw string, log io.Writer) {
+// report and returns the parsed findings (nil when the output wasn't a
+// findings array — then a bounded excerpt is printed instead, never the whole
+// response, which on a broken run can be an entire transcript).
+func showReview(raw string, log io.Writer) []findings.Finding {
 	list, ok := findings.Parse(raw)
 	if !ok {
 		fmt.Fprintln(log, findings.Unparsable(raw))
-		return
+		return nil
 	}
 	findings.Render(log, list, true)
+	return list
 }
 
 // openPR opens a PR for branch via the PR client, then finalizes its title and
