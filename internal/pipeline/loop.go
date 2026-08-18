@@ -268,8 +268,10 @@ func commitPush(wt *gitx.Worktree, remote, branch, msg string, log io.Writer) (p
 		return false, err
 	}
 	fmt.Fprintf(log, "review-lens: committed + pushing (%s)\n", msg)
-	if err := wt.Push(remote, branch); err != nil {
+	advanced, reason, err := wt.Publish(remote, branch)
+	if err != nil {
 		return false, fmt.Errorf("push failed: %w", err)
 	}
+	reportPublish(log, branch, advanced, reason)
 	return true, nil
 }

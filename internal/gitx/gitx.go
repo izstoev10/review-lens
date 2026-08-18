@@ -179,3 +179,69 @@ func (w *Worktree) Push(remote, branch string) error {
 	_, err := run(w.Path, "push", "--force-with-lease", "-u", remote, "HEAD:refs/heads/"+branch)
 	return err
 }
+
+// Publish makes the worktree's HEAD public and reconciles the originating
+// repo: push to remote/branch, then fast-forward the user's local branch to
+// the pushed commit when that is provably safe. localAdvanced reports whether
+// the local branch now points at what was pushed; when it was left behind,
+// reason says why in one line (an already-current branch reports false, "").
+//
+// The reconciliation is what keeps `run`'s fix commits from being reachable
+// only on the remote: the worktree that made them is deleted right after, and
+// without this the user's checkout silently falls behind a branch they just
+// "successfully" pushed. An error means the push itself failed — the local
+// fast-forward is best-effort, reported through reason, never an error.
+func (w *Worktree) Publish(remote, branch string) (localAdvanced bool, reason string, err error) {
+	if err := w.Push(remote, branch); err != nil {
+		return false, "", err
+	}
+	sha, err := run(w.Path, "rev-parse", "HEAD")
+	if err != nil {
+		return false, "", err
+	}
+	advanced, reason := advanceBranch(w.repo, branch, sha)
+	return advanced, reason, nil
+}
+
+// advanceBranch fast-forwards repo's local branch to sha when safe, and says
+// why not otherwise. The guards, in order: the branch must exist, sha must be
+// a descendant (never rewind or sidestep the user's work), and the working
+// tree must survive — a checked-out branch moves via `merge --ff-only` (git
+// refuses cleanly when local edits overlap), any other via `branch -f` (git
+// refuses when a linked worktree has the branch checked out).
+func advanceBranch(repo, branch, sha string) (advanced bool, reason string) {
+	old, err := run(repo, "rev-parse", "--verify", "refs/heads/"+branch)
+	if err != nil {
+		return false, fmt.Sprintf("no local branch %q", branch)
+	}
+	if old == sha {
+		return false, "" // already at the pushed commit; nothing to reconcile
+	}
+	if _, err := run(repo, "merge-base", "--is-ancestor", old, sha); err != nil {
+		return false, fmt.Sprintf("local %s has diverged from what was pushed", branch)
+	}
+	head, _ := run(repo, "symbolic-ref", "-q", "HEAD")
+	if head == "refs/heads/"+branch {
+		if _, err := run(repo, "merge", "--ff-only", sha); err != nil {
+			return false, gitReason(err)
+		}
+		return true, ""
+	}
+	if _, err := run(repo, "branch", "-f", branch, sha); err != nil {
+		return false, gitReason(err)
+	}
+	return true, ""
+}
+
+// gitReason compresses a multi-line git failure into the one line a user can
+// act on — git puts it on the "error:"/"fatal:" line, not the first line.
+func gitReason(err error) string {
+	lines := strings.Split(strings.TrimSpace(err.Error()), "\n")
+	for _, ln := range lines {
+		ln = strings.TrimSpace(ln)
+		if strings.HasPrefix(ln, "error:") || strings.HasPrefix(ln, "fatal:") {
+			return ln
+		}
+	}
+	return lines[len(lines)-1]
+}
