@@ -139,11 +139,15 @@ func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) er
 		}
 	}
 
-	// 5. Push the (green) HEAD to the remote.
+	// 5. Publish the (green) HEAD: push to the remote, then fast-forward the
+	//    user's local branch to it when that is safe — otherwise any fix
+	//    commits exist only on the remote once the worktree is deleted.
 	fmt.Fprintf(log, "review-lens: pushing to %s/%s\n", cfg.Remote, branch)
-	if err := wt.Push(cfg.Remote, branch); err != nil {
+	advanced, reason, err := wt.Publish(cfg.Remote, branch)
+	if err != nil {
 		return fmt.Errorf("push failed: %w", err)
 	}
+	reportPublish(log, branch, advanced, reason)
 
 	// 6. Optionally open a PR via the gh CLI, building the body and stamping the
 	//    gate signature.
@@ -155,6 +159,17 @@ func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) er
 
 	fmt.Fprintln(log, "review-lens: ✅ all checks green, pushed.")
 	return nil
+}
+
+// reportPublish tells the user where the pushed commit ended up locally —
+// silence here is how a checkout falls behind without anyone noticing.
+func reportPublish(log io.Writer, branch string, advanced bool, reason string) {
+	switch {
+	case advanced:
+		fmt.Fprintf(log, "review-lens: local %s fast-forwarded to the pushed commit\n", branch)
+	case reason != "":
+		fmt.Fprintf(log, "review-lens: note: local %s was NOT advanced (%s) — run `git pull --ff-only` to catch up\n", branch, reason)
+	}
 }
 
 // preflight validates the configured gate against the worktree before any

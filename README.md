@@ -17,8 +17,15 @@ current branch
         └─▶ run checks in order (build, test, lint, …)
               ├─ red ──▶ ask agent to fix ▶ re-run  (up to N attempts)
               └─ green ─▶ AI reviews the diff vs main ▶ print findings
-                          └─▶ push ▶ open PR ▶ stamp gate signature
+                          └─▶ push ▶ fast-forward your local branch ▶ open PR
+                                                        ▶ stamp gate signature
 ```
+
+After a green push, review-lens fast-forwards your local branch to the pushed
+commit whenever that's provably safe (clean fast-forward, never rewinding or
+touching your uncommitted work) — so fix commits made in the worktree land in
+your checkout instead of existing only on the remote. When it can't, it says
+why and how to catch up.
 
 Checks are the **gate** (red blocks the push). The AI review is **advisory** —
 it prints findings for you but never blocks. Your real working directory is
