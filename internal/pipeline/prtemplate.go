@@ -46,6 +46,36 @@ func withJiraRef(body, url string) string {
 	return line + "\n\n" + body
 }
 
+// uninformativeTitle reports whether a commit-derived PR title carries no
+// information worth keeping: a known throwaway subject (wip, fixup, tmp) or a
+// bare single token. Multi-word subjects are always kept — the cost of
+// wrongly replacing a real title is higher than letting a dull one through.
+func uninformativeTitle(title string) bool {
+	fields := strings.Fields(title)
+	if len(fields) != 1 {
+		return len(fields) == 0
+	}
+	switch strings.ToLower(strings.TrimRight(fields[0], "!:.")) {
+	case "wip", "fixup", "fixup!", "tmp", "temp", "squash", "x", "asdf", "test", "changes", "stuff", "update", "updates", "fix", "fixes", "misc":
+		return true
+	}
+	// A bare token with no word separators ("wip2", "asdfgh") says nothing; a
+	// dotted or path-like one ("main.go", "v1.2.3") at least names a thing.
+	return !strings.ContainsAny(fields[0], "./")
+}
+
+// titleFromBranch derives a readable PR title from a branch name:
+// "feat/tui-apply-flow" → "feat: tui apply flow". A branch without a prefix
+// just gets its separators spaced out.
+func titleFromBranch(branch string) string {
+	words := strings.NewReplacer("-", " ", "_", " ", "/", " ")
+	prefix, rest, found := strings.Cut(branch, "/")
+	if !found || strings.TrimSpace(words.Replace(rest)) == "" {
+		return strings.TrimSpace(words.Replace(branch))
+	}
+	return prefix + ": " + strings.TrimSpace(words.Replace(rest))
+}
+
 // prTemplatePaths are the locations GitHub honours for a single PR template,
 // spelled both lower- and upper-case (the two conventions in the wild).
 var prTemplatePaths = []string{

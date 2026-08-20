@@ -111,6 +111,22 @@ Diff:
 %s`, template, truncate(diff, maxInput))
 }
 
+// PRDescriptionPrompt asks for a PR body written from the diff alone, for
+// repositories with no PR template. Sibling of PRBodyPrompt with the same
+// output discipline: markdown only, no fences, nothing invented.
+func PRDescriptionPrompt(diff string) string {
+	return fmt.Sprintf(`You are writing the description for a pull request. The repository has no PR template.
+
+Write a concise PR body in markdown based ONLY on the code diff. Rules:
+- Start with a "## What" section: what changed and why, in a few sentences or bullets.
+- Add further short sections only when the diff warrants them (e.g. "## Notes" for risks or follow-ups).
+- Do not invent facts, links, or issue references that are not visible in the diff.
+- Do NOT modify any files. Output ONLY the finished markdown body — no code fences, no preamble, no closing remarks.
+
+Diff:
+%s`, truncate(diff, maxInput))
+}
+
 // streamFormat identifies the structured event protocol (if any) the configured
 // command emits on stdout. It decides how execAgent separates the agent's final
 // answer from its activity and from transport diagnostics — the three must never

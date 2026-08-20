@@ -455,11 +455,13 @@ func openPR(c gh.Client, wt *gitx.Worktree, cfg config.Config, branch string, lo
 
 // finalizePR sets the PR's title/body and always ensures the gate signature.
 //
-// On creation it builds the body from the repo's PR template (when present):
-// the agent fills the template in from the branch diff, falling back to the raw
-// template, then to gh's commit-derived body. If jiraBaseURL is set and a ticket
-// key is parseable from the branch, it prefixes the title with "[KEY]" and adds
-// a clickable "Jira:" link. On a re-run against an existing PR (created=false)
+// On creation it repairs an uninformative commit-derived title from the branch
+// name, and builds the body: an agent fills the repo's PR template from the
+// branch diff when one exists, writes a description from the diff alone when
+// there is no template, and each falls back a step on failure (raw template,
+// then gh's commit-derived body). If jiraBaseURL is set and a ticket key is
+// parseable from the branch, it prefixes the title with "[KEY]" and adds a
+// clickable "Jira:" link. On a re-run against an existing PR (created=false)
 // it only back-fills the signature — never clobbering a body or title a human
 // may have edited.
 func finalizePR(c gh.Client, wt *gitx.Worktree, cfg config.Config, branch string, created bool, log io.Writer) error {
@@ -470,17 +472,29 @@ func finalizePR(c gh.Client, wt *gitx.Worktree, cfg config.Config, branch string
 	newTitle, newBody := pr.Title, pr.Body
 
 	if created {
-		if tmpl := findPRTemplate(wt.Path); tmpl != "" {
+		if uninformativeTitle(pr.Title) {
+			newTitle = titleFromBranch(branch)
+			fmt.Fprintf(log, "review-lens: title %q says nothing — using %q from the branch name\n", pr.Title, newTitle)
+		}
+		tmpl := findPRTemplate(wt.Path)
+		switch {
+		case tmpl != "" && cfg.Agent != nil:
 			newBody = tmpl
-			if cfg.Agent != nil {
-				fmt.Fprintln(log, "review-lens: filling in the PR template from the diff…")
-				if filled, err := fillPRTemplate(wt, cfg, tmpl, log); err != nil {
-					fmt.Fprintf(log, "review-lens: could not fill template (%v); using it as-is\n", err)
-				} else {
-					newBody = filled
-				}
+			fmt.Fprintln(log, "review-lens: filling in the PR template from the diff…")
+			if filled, err := fillPRTemplate(wt, cfg, tmpl, log); err != nil {
+				fmt.Fprintf(log, "review-lens: could not fill template (%v); using it as-is\n", err)
 			} else {
-				fmt.Fprintln(log, "review-lens: using the repo PR template for the body")
+				newBody = filled
+			}
+		case tmpl != "":
+			newBody = tmpl
+			fmt.Fprintln(log, "review-lens: using the repo PR template for the body")
+		case cfg.Agent != nil:
+			fmt.Fprintln(log, "review-lens: writing the PR description from the diff…")
+			if body, err := describePR(wt, cfg, log); err != nil {
+				fmt.Fprintf(log, "review-lens: could not write a description (%v); keeping gh's default body\n", err)
+			} else {
+				newBody = body
 			}
 		}
 		if key := jiraKeyFromBranch(branch); key != "" && cfg.JiraBaseURL != "" {
@@ -508,6 +522,25 @@ func finalizePR(c gh.Client, wt *gitx.Worktree, cfg config.Config, branch string
 // (missing base, empty diff, agent failure, empty output) lets the caller fall
 // back to the raw template — filling is best-effort.
 func fillPRTemplate(wt *gitx.Worktree, cfg config.Config, tmpl string, log io.Writer) (string, error) {
+	diff, err := branchDiff(wt, cfg)
+	if err != nil {
+		return "", err
+	}
+	return askForBody(wt, cfg, agent.PRBodyPrompt(tmpl, diff), log)
+}
+
+// describePR asks the agent for a PR body written from the branch's diff
+// alone — the no-template sibling of fillPRTemplate, equally best-effort.
+func describePR(wt *gitx.Worktree, cfg config.Config, log io.Writer) (string, error) {
+	diff, err := branchDiff(wt, cfg)
+	if err != nil {
+		return "", err
+	}
+	return askForBody(wt, cfg, agent.PRDescriptionPrompt(diff), log)
+}
+
+// branchDiff returns the branch's non-empty diff against its resolved base.
+func branchDiff(wt *gitx.Worktree, cfg config.Config) (string, error) {
 	base, err := resolveBaseBranch(wt, cfg)
 	if err != nil {
 		return "", err
@@ -519,7 +552,13 @@ func fillPRTemplate(wt *gitx.Worktree, cfg config.Config, tmpl string, log io.Wr
 	if strings.TrimSpace(diff) == "" {
 		return "", fmt.Errorf("no diff vs %s", base)
 	}
-	raw, err := agent.Review(wt.Path, cfg.Agent, agent.PRBodyPrompt(tmpl, diff), log)
+	return diff, nil
+}
+
+// askForBody runs the agent with a body-writing prompt and normalises the
+// answer: fences stripped, an empty result reported as an error.
+func askForBody(wt *gitx.Worktree, cfg config.Config, prompt string, log io.Writer) (string, error) {
+	raw, err := agent.Review(wt.Path, cfg.Agent, prompt, log)
 	if err != nil {
 		return "", err
 	}
