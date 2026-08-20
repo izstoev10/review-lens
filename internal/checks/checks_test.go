@@ -38,6 +38,14 @@ func TestRunClassifiesEnvironmentFailures(t *testing.T) {
 		want  string
 	}{
 		{
+			// The invariant #59 pinned on this package: Run is total, so an
+			// empty argv — however a caller built it — reports as
+			// configuration, never a panic.
+			name:  "empty command",
+			check: config.Check{Name: "x"},
+			want:  "no command",
+		},
+		{
 			name:  "missing working directory",
 			check: config.Check{Name: "x", Cmd: []string{"true"}, Dir: "gone"},
 			want:  "working directory",

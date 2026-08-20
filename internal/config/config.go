@@ -15,6 +15,11 @@ import (
 
 // Check is a single command gate runs against your code (a linter, tests, etc).
 // A check "passes" when its process exits 0.
+//
+// Cmd must be a non-empty argv. The invariant's owner is checks.Run, which is
+// total: it reports an empty Cmd as a configuration problem instead of
+// executing (or panicking on) it. pipeline.preflight additionally rejects an
+// empty Cmd up front so a misconfigured gate fails before any work runs.
 type Check struct {
 	Name string   `json:"name"` // human label, e.g. "test"
 	Cmd  []string `json:"cmd"`  // argv, e.g. ["go", "test", "./..."]
