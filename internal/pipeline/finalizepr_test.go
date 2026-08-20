@@ -57,6 +57,56 @@ func TestFinalizePRBackfillsOnlyTheSignature(t *testing.T) {
 	}
 }
 
+// The #40 gap: a fresh PR in a template-less repo with a throwaway commit
+// subject used to keep title "wip" and an empty body even with an agent
+// configured. On creation the title must come from the branch name and the
+// body from the agent's read of the diff.
+func TestFinalizePRRepairsTitleAndWritesBodyWithoutTemplate(t *testing.T) {
+	root, _ := pushableRepo(t) // on feat/x, one commit ahead of main, no PR template
+	c, edits := fakePR(t, gh.PR{Number: 9, Title: "wip", Body: ""})
+	wt := &gitx.Worktree{Path: root}
+	cfg := config.Config{
+		BaseBranch: "main",
+		Agent:      &config.Agent{Cmd: []string{"sh", "-c", "echo agent-written-description"}},
+	}
+
+	var log bytes.Buffer
+	if err := finalizePR(c, wt, cfg, "feat/tui-apply-flow", true, &log); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(*edits) != 1 {
+		t.Fatalf("gh pr edit invoked %d times, want 1", len(*edits))
+	}
+	argv := strings.Join((*edits)[0], " ")
+	if !strings.Contains(argv, "feat: tui apply flow") {
+		t.Errorf("edit = %q, want the branch-derived title", argv)
+	}
+	if !strings.Contains(argv, "agent-written-description") || !strings.Contains(argv, signature.Marker) {
+		t.Errorf("edit = %q, want the agent's body plus the signature", argv)
+	}
+}
+
+// A human-quality commit subject survives creation untouched — only the body
+// is generated.
+func TestFinalizePRKeepsAnInformativeTitle(t *testing.T) {
+	root, _ := pushableRepo(t)
+	c, edits := fakePR(t, gh.PR{Number: 9, Title: "Add the tui apply flow", Body: ""})
+	wt := &gitx.Worktree{Path: root}
+	cfg := config.Config{BaseBranch: "main"} // no agent: gh's body stands
+
+	var log bytes.Buffer
+	if err := finalizePR(c, wt, cfg, "feat/tui-apply-flow", true, &log); err != nil {
+		t.Fatal(err)
+	}
+	if len(*edits) != 1 {
+		t.Fatalf("gh pr edit invoked %d times, want 1 (signature)", len(*edits))
+	}
+	if argv := strings.Join((*edits)[0], " "); strings.Contains(argv, "--title") {
+		t.Errorf("edit = %q — an informative title must not be rewritten", argv)
+	}
+}
+
 // An already-signed PR needs no edit at all.
 func TestFinalizePRAlreadySignedIsANoOp(t *testing.T) {
 	body, _ := signature.Ensure("done")

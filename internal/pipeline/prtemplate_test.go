@@ -58,6 +58,50 @@ func TestWithJiraRef(t *testing.T) {
 	}
 }
 
+// The replace/keep boundary for commit-derived titles: throwaway subjects and
+// bare tokens go, anything multi-word or thing-naming stays — a real title
+// wrongly replaced costs more than a dull one kept.
+func TestUninformativeTitle(t *testing.T) {
+	tests := []struct {
+		title string
+		want  bool
+	}{
+		{"wip", true},
+		{"WIP", true},
+		{"fixup!", true},
+		{"tmp", true},
+		{"asdfgh", true},
+		{"wip2", true},
+		{"", true},
+		{"Fix the base-branch gate bypass", false},
+		{"add limiter", false},
+		{"main.go", false},  // names a thing
+		{"docs/adr", false}, // names a thing
+		{"v1.2.3", false},   // names a thing
+	}
+	for _, tt := range tests {
+		if got := uninformativeTitle(tt.title); got != tt.want {
+			t.Errorf("uninformativeTitle(%q) = %v, want %v", tt.title, got, tt.want)
+		}
+	}
+}
+
+func TestTitleFromBranch(t *testing.T) {
+	tests := []struct{ branch, want string }{
+		{"feat/tui-apply-flow", "feat: tui apply flow"},
+		{"fix/base_branch_guard", "fix: base branch guard"},
+		{"feat/oa-2576-add-limiter", "feat: oa 2576 add limiter"},
+		{"standalone-branch", "standalone branch"},
+		{"feat/", "feat"},
+		{"a/b/c", "a: b c"},
+	}
+	for _, tt := range tests {
+		if got := titleFromBranch(tt.branch); got != tt.want {
+			t.Errorf("titleFromBranch(%q) = %q, want %q", tt.branch, got, tt.want)
+		}
+	}
+}
+
 func TestStripFences(t *testing.T) {
 	cases := map[string]string{
 		"## Title\n\nbody":                 "## Title\n\nbody", // unfenced, unchanged
