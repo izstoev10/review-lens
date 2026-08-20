@@ -158,13 +158,17 @@ func TestCheckAndFixSendsGenuineFailuresToTheAgent(t *testing.T) {
 	cfg.Agent = &config.Agent{Cmd: []string{"sh", "-c", "touch " + marker}}
 
 	var log bytes.Buffer
-	_, err := checkAndFix(dir, cfg, &log)
+	fixed, err := checkAndFix(dir, cfg, &log)
 
 	if err == nil {
 		t.Fatal("the check never passes, so the loop must eventually fail")
 	}
 	if _, statErr := os.Stat(marker); statErr != nil {
 		t.Error("a genuine check failure never reached the agent seam")
+	}
+	// The caller writes the commit message from these names (#39).
+	if len(fixed) != 1 || fixed[0] != "test" {
+		t.Errorf("fixed = %v, want the failed check's name exactly once", fixed)
 	}
 	if !strings.Contains(err.Error(), "still failing") {
 		t.Errorf("err = %v, want the attempts-exhausted failure, not a config error", err)

@@ -70,21 +70,21 @@ func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) er
 	}
 
 	// 2. Check / fix loop.
-	agentRan, err := checkAndFix(wt.Path, cfg, log)
+	fixedChecks, err := checkAndFix(wt.Path, cfg, log)
 	if err != nil {
 		return err
 	}
 
-	// 3. Commit only if the agent actually applied a fix. We gate on agentRan
-	//    (not merely "the worktree is dirty") so stray build artifacts left by
-	//    the checks themselves never get committed or pushed.
-	if agentRan {
+	// 3. Commit only if the agent actually applied a fix. We gate on the agent
+	//    having run (not merely "the worktree is dirty") so stray build
+	//    artifacts left by the checks themselves never get committed or pushed.
+	if len(fixedChecks) > 0 {
 		changed, err := wt.HasChanges()
 		if err != nil {
 			return err
 		}
 		if changed {
-			sha, err := wt.CommitAll("review-lens: apply automated fixes")
+			sha, err := wt.CommitAll(checkFixMessage(fixedChecks))
 			if err != nil {
 				return fmt.Errorf("committing fixes: %w", err)
 			}
@@ -124,13 +124,14 @@ func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) er
 			return err
 		} else if changed {
 			fmt.Fprintln(log, "review-lens: review applied fixes — re-running checks…")
-			if _, err := checkAndFix(wt.Path, cfg, log); err != nil {
+			alsoFixed, err := checkAndFix(wt.Path, cfg, log)
+			if err != nil {
 				return err
 			}
 			if changed, err := wt.HasChanges(); err != nil {
 				return err
 			} else if changed {
-				sha, err := wt.CommitAll("review-lens: apply review fixes")
+				sha, err := wt.CommitAll(reviewFixMessage(*review, alsoFixed))
 				if err != nil {
 					return fmt.Errorf("committing review fixes: %w", err)
 				}
@@ -216,11 +217,12 @@ func runSetup(dir string, cfg config.Config, log io.Writer) error {
 }
 
 // checkAndFix runs all checks, and on failure asks the agent to fix and retries,
-// up to cfg.MaxAgentAttempts. It returns agentRan=true if the agent was invoked
-// at least once (so the caller knows whether to commit). It returns an error if
-// checks are still failing when attempts run out (or if no agent is configured
-// to fix them).
-func checkAndFix(dir string, cfg config.Config, log io.Writer) (agentRan bool, err error) {
+// up to cfg.MaxAgentAttempts. It returns the names of the checks the agent was
+// asked to fix (deduplicated, in order) — non-empty means the agent ran, and
+// the names let the caller write a commit message that says what was fixed. It
+// returns an error if checks are still failing when attempts run out (or if no
+// agent is configured to fix them).
+func checkAndFix(dir string, cfg config.Config, log io.Writer) (fixed []string, err error) {
 	attempts := cfg.MaxAgentAttempts
 	for i := 0; ; i++ {
 		results, ok := checks.RunAll(dir, cfg.Checks)
@@ -232,7 +234,7 @@ func checkAndFix(dir string, cfg config.Config, log io.Writer) (agentRan bool, e
 			fmt.Fprintf(log, "review-lens:   [%s] %s\n", status, r.Name)
 		}
 		if ok {
-			return agentRan, nil
+			return fixed, nil
 		}
 
 		failed := results[len(results)-1] // fail-fast: last result is the failure
@@ -241,25 +243,71 @@ func checkAndFix(dir string, cfg config.Config, log io.Writer) (agentRan bool, e
 		// working directory) is invalid configuration: asking the agent to edit
 		// code for it would misdiagnose the problem and burn a fix attempt.
 		if failed.ConfigProblem != "" {
-			return agentRan, fmt.Errorf("check %q cannot run: %s — run `review-lens configure` to repair the gate\n%s",
+			return fixed, fmt.Errorf("check %q cannot run: %s — run `review-lens configure` to repair the gate\n%s",
 				failed.Name, failed.ConfigProblem, strings.TrimSpace(failed.Output))
 		}
 
 		if cfg.Agent == nil {
-			return agentRan, fmt.Errorf("check %q failed and no agent configured:\n%s", failed.Name, failed.Output)
+			return fixed, fmt.Errorf("check %q failed and no agent configured:\n%s", failed.Name, failed.Output)
 		}
 		if i >= attempts {
-			return agentRan, fmt.Errorf("check %q still failing after %d fix attempt(s)", failed.Name, attempts)
+			return fixed, fmt.Errorf("check %q still failing after %d fix attempt(s)", failed.Name, attempts)
 		}
 
 		fmt.Fprintf(log, "review-lens: attempt %d/%d — asking agent to fix %q (live output below)\n", i+1, attempts, failed.Name)
-		agentRan = true
+		if !contains(fixed, failed.Name) {
+			fixed = append(fixed, failed.Name)
+		}
 		prompt := agent.Prompt(failed.Name, failed.Output)
 		if err := agent.Fix(dir, cfg.Agent, prompt, log); err != nil {
-			return agentRan, fmt.Errorf("agent fix failed: %w", err)
+			return fixed, fmt.Errorf("agent fix failed: %w", err)
 		}
 		fmt.Fprintln(log, "\nreview-lens: agent finished, re-running checks...")
 	}
+}
+
+func contains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// checkFixMessage writes the commit subject for agent fixes made in the
+// check/fix loop, naming the checks that failed — so branch history says what
+// was repaired instead of a fixed string (#39).
+func checkFixMessage(fixed []string) string {
+	if len(fixed) == 1 {
+		return fmt.Sprintf("review-lens: fix failing %q check", fixed[0])
+	}
+	return "review-lens: fix failing checks: " + strings.Join(fixed, ", ")
+}
+
+// reviewFixMessage writes the commit message for fixes applied in the review
+// session: a subject with the count, then one line per applied finding
+// (file:line — title), plus any checks the re-gate's agent had to fix so those
+// edits are accounted for too (#39).
+func reviewFixMessage(o tui.Outcome, alsoFixedChecks []string) string {
+	var applied []findings.Finding
+	for i, f := range o.Findings {
+		if i < len(o.Decisions) && o.Decisions[i] == tui.DecisionApplied {
+			applied = append(applied, f)
+		}
+	}
+	if len(applied) == 0 {
+		return "review-lens: apply review fixes"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "review-lens: apply %s\n", plural(len(applied), "review fix"))
+	for _, f := range applied {
+		fmt.Fprintf(&b, "\n- %s — %s", loc(f), f.Title)
+	}
+	for _, name := range alsoFixedChecks {
+		fmt.Fprintf(&b, "\n- also fixed the failing %q check during the re-gate", name)
+	}
+	return b.String()
 }
 
 // reviewDiff computes the branch's diff against the base branch and asks the
@@ -412,7 +460,13 @@ func plural(n int, word string) string {
 	if n == 1 {
 		return "1 " + word
 	}
-	return fmt.Sprintf("%d %ss", n, word)
+	suffix := "s"
+	// Sibilant endings take "es": fix → fixes.
+	if strings.HasSuffix(word, "x") || strings.HasSuffix(word, "s") ||
+		strings.HasSuffix(word, "ch") || strings.HasSuffix(word, "sh") {
+		suffix = "es"
+	}
+	return fmt.Sprintf("%d %s%s", n, word, suffix)
 }
 
 // showReview prints an agent's raw review output as the compact colourised
