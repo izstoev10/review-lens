@@ -27,7 +27,14 @@ type Result struct {
 
 // Run executes one check under base (the repo root or worktree), inside the
 // check's own working directory when it declares one.
+//
+// Run is total over config.Check: a check with an empty argv is reported as a
+// configuration problem, the same classification as a missing executable or
+// working directory — never a panic, whichever entry point built the Check.
 func Run(base string, c config.Check) Result {
+	if len(c.Cmd) == 0 {
+		return Result{Name: c.Name, ConfigProblem: "the check has no command — run `review-lens configure` to repair the gate"}
+	}
 	dir := filepath.Join(base, c.Dir)
 	if _, err := os.Stat(dir); err != nil {
 		return Result{Name: c.Name, ConfigProblem: fmt.Sprintf("working directory %q does not exist", c.Dir)}
