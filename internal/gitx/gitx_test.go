@@ -10,7 +10,7 @@ import (
 // TestDiffSinceAmbiguousBasePath guards the regression where a base ref that
 // also names a path (e.g. a "base" branch next to a "base/" directory) made
 // `git diff --merge-base base HEAD` bail with "ambiguous argument". The trailing
-// "--" in DiffSince/ChangedFiles fixes it.
+// "--" in DiffSince fixes it.
 func TestDiffSinceAmbiguousBasePath(t *testing.T) {
 	dir := t.TempDir()
 	git := func(args ...string) {
@@ -52,20 +52,6 @@ func TestDiffSinceAmbiguousBasePath(t *testing.T) {
 	}
 	if !strings.Contains(diff, "a.txt") {
 		t.Errorf("diff should mention the changed file; got:\n%s", diff)
-	}
-
-	files, err := w.ChangedFiles("base")
-	if err != nil {
-		t.Fatalf("ChangedFiles returned error: %v", err)
-	}
-	var sawA bool
-	for _, f := range files {
-		if f == "a.txt" {
-			sawA = true
-		}
-	}
-	if !sawA {
-		t.Errorf("ChangedFiles should include a.txt; got %v", files)
 	}
 }
 

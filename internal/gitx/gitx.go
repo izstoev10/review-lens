@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -110,17 +109,6 @@ func (w *Worktree) HasChanges() (bool, error) {
 	return out != "", nil
 }
 
-// Diff returns the unstaged+staged diff in the worktree. Useful as context for
-// the agent.
-//
-// The trailing "--" separates revisions from pathspecs: without it, a ref that
-// also names a file/dir in the repo (e.g. a branch "main" alongside a "main/"
-// directory) makes git bail with "ambiguous argument … both revision and
-// filename".
-func (w *Worktree) Diff() (string, error) {
-	return run(w.Path, "diff", "HEAD", "--")
-}
-
 // RefExists reports whether ref (e.g. "main" or "origin/main") resolves in the
 // worktree. Used to decide whether a review diff is possible.
 func (w *Worktree) RefExists(ref string) bool {
@@ -131,33 +119,13 @@ func (w *Worktree) RefExists(ref string) bool {
 // DiffSince returns the diff of this branch's HEAD against its merge-base with
 // base — i.e. exactly the changes this branch introduces on top of base. This
 // is what a reviewer wants to look at, not unrelated commits already on base.
+//
+// The trailing "--" separates revisions from pathspecs: without it, a base
+// branch that also names a file/dir in the repo (e.g. a branch "main"
+// alongside a "main/" directory) makes git bail with "ambiguous argument …
+// both revision and filename".
 func (w *Worktree) DiffSince(base string) (string, error) {
-	// Trailing "--": see Diff. A base branch that also matches a path (e.g. a
-	// "main" branch next to a "main/" directory) is otherwise ambiguous to git.
 	return run(w.Path, "diff", "--merge-base", base, "HEAD", "--")
-}
-
-// ChangedFiles returns the paths this branch changed versus its merge-base with
-// base, restricted to files that still exist in the worktree (so deleted files
-// aren't handed to a linter). Used to scope checks/fixes to the diff instead of
-// the whole repo — essential on large monorepos.
-func (w *Worktree) ChangedFiles(base string) ([]string, error) {
-	// Trailing "--" disambiguates the base ref from any like-named path (see Diff).
-	out, err := run(w.Path, "diff", "--name-only", "--merge-base", base, "HEAD", "--")
-	if err != nil {
-		return nil, err
-	}
-	var files []string
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if _, statErr := os.Stat(filepath.Join(w.Path, line)); statErr == nil {
-			files = append(files, line)
-		}
-	}
-	return files, nil
 }
 
 // CommitAll stages everything and commits with msg. Returns the new commit SHA.
