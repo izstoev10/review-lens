@@ -93,6 +93,82 @@ func TestRunStopsBeforePushOnUnresolvedAskUser(t *testing.T) {
 	}
 }
 
+// The #37 gate bypass: a run on the base branch used to skip the review,
+// fall through to a force-with-lease push of the base, and report success.
+// It must refuse up front — before the worktree and checks — and nothing may
+// reach the remote.
+func TestRunRefusesTheBaseBranch(t *testing.T) {
+	root, remote := pushableRepo(t)
+	git := exec.Command("git", "switch", "-q", "main")
+	git.Dir = root
+	if out, err := git.CombinedOutput(); err != nil {
+		t.Fatalf("git switch: %v\n%s", err, out)
+	}
+	cfg := reviewingConfig(`[]`)
+
+	var log bytes.Buffer
+	err := Run(root, cfg, false, &log)
+
+	if err == nil || !strings.Contains(err.Error(), "base branch") {
+		t.Fatalf("err = %v, want a base-branch refusal", err)
+	}
+	if !strings.Contains(err.Error(), "feature branch") {
+		t.Errorf("err = %v, want it to tell the user to create a branch", err)
+	}
+	if strings.Contains(log.String(), "isolated worktree") {
+		t.Error("a worktree was created before the base-branch refusal")
+	}
+	if remoteHasBranch(t, remote, "main") {
+		t.Error("the base branch reached the remote despite the refusal")
+	}
+}
+
+// The name guard can miss (it compares names, not refs): with a configured
+// base that doesn't exist, resolution can still land on the current branch.
+// That skipped review must fail closed instead of falling through to a push.
+func TestRunFailsClosedWhenResolutionLandsOnTheCurrentBranch(t *testing.T) {
+	root, remote := pushableRepo(t)
+	git := exec.Command("git", "switch", "-q", "main")
+	git.Dir = root
+	if out, err := git.CombinedOutput(); err != nil {
+		t.Fatalf("git switch: %v\n%s", err, out)
+	}
+	cfg := reviewingConfig(`[]`)
+	cfg.BaseBranch = "develop" // doesn't exist; resolution falls back to main
+
+	var log bytes.Buffer
+	err := Run(root, cfg, false, &log)
+
+	if err == nil || !strings.Contains(err.Error(), "nothing to review") {
+		t.Fatalf("err = %v, want the fail-closed skipped-review error", err)
+	}
+	if remoteHasBranch(t, remote, "main") {
+		t.Error("the base branch reached the remote despite the skipped review")
+	}
+}
+
+func TestOnBaseBranch(t *testing.T) {
+	tests := []struct {
+		name, branch, configured string
+		want                     bool
+	}{
+		{"configured base matches", "main", "main", true},
+		{"feature branch passes", "feat/x", "main", false},
+		{"only the configured name counts when set", "master", "develop", false},
+		{"unset base falls back to main", "main", "", true},
+		{"unset base falls back to master", "master", "", true},
+		{"unset base still passes features", "feat/x", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Config{BaseBranch: tt.configured}
+			if got := onBaseBranch(tt.branch, cfg); got != tt.want {
+				t.Errorf("onBaseBranch(%q, base=%q) = %v, want %v", tt.branch, tt.configured, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRunPushesWhenNoAskUserFindings(t *testing.T) {
 	root, remote := pushableRepo(t)
 	cfg := reviewingConfig(`[{"severity":"info","file":"a.txt","line":1,"title":"fyi","detail":"d","action":"no-op"}]`)

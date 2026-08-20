@@ -41,6 +41,15 @@ func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) er
 	}
 	fmt.Fprintf(log, "review-lens: repo=%s branch=%s\n", root, branch)
 
+	// 0. Running on the base branch is almost always a mistake (you forgot to
+	//    branch), and the review would have nothing to diff — its skip used to
+	//    bypass the #28 fail-closed guard and force-with-lease push local
+	//    commits straight to the base (#37). Refuse before the worktree,
+	//    checks, or agent spend any time.
+	if onBaseBranch(branch, cfg) {
+		return fmt.Errorf("on base branch %q — create a feature branch first (e.g. `git switch -c feat/…`) and rerun; review-lens does not push the base branch directly", branch)
+	}
+
 	// 1. Isolate: everything below runs in a throwaway worktree, so the user's
 	//    working directory is never modified even while the agent edits files.
 	wt, err := gitx.AddWorktree(root, branch)
@@ -151,14 +160,29 @@ func Run(startDir string, cfg config.Config, interactive bool, log io.Writer) er
 
 	// 6. Optionally open a PR via the gh CLI, building the body and stamping the
 	//    gate signature.
+	prNote := ""
 	if cfg.OpenPR {
 		if err := openPR(gh.Client{Dir: wt.Path}, wt, cfg, branch, log); err != nil {
 			fmt.Fprintf(log, "review-lens: PR step skipped: %v\n", err)
+			prNote = " (PR step skipped)"
 		}
 	}
 
-	fmt.Fprintln(log, "review-lens: ✅ all checks green, pushed.")
+	// The final line claims only what actually happened (#37).
+	fmt.Fprintf(log, "review-lens: ✅ all checks green, pushed%s.\n", prNote)
 	return nil
+}
+
+// onBaseBranch reports whether branch is the branch a review would diff
+// against — the configured base, or the conventional defaults when none is
+// configured. A pure name comparison: it must be answerable before any
+// worktree exists, so resolveBaseBranch's ref resolution can't run yet; the
+// resolved case is fail-closed separately in reviewDiff.
+func onBaseBranch(branch string, cfg config.Config) bool {
+	if cfg.BaseBranch != "" {
+		return branch == cfg.BaseBranch
+	}
+	return branch == "main" || branch == "master"
 }
 
 // reportPublish tells the user where the pushed commit ended up locally —
@@ -311,10 +335,12 @@ func reviewDiff(wt *gitx.Worktree, cfg config.Config, branch, reviewGuidance str
 		return nil, err
 	}
 	if base == branch {
-		// Running on the base branch itself — nothing to diff. Not an error: the
-		// caller may still legitimately push it (there's just no PR to review).
-		fmt.Fprintf(log, "review-lens: on base branch %q; nothing to review\n", base)
-		return nil, nil
+		// Run's early guard compares names only, so resolution can still land
+		// here (e.g. configured base "main" in a repo whose real base is
+		// "master"). A review skipped because there is nothing to diff must
+		// not fall through to the push — the sibling of #28's fail-closed
+		// rule (#37).
+		return nil, fmt.Errorf("on base branch %q — nothing to review; create a feature branch and rerun", base)
 	}
 	diff, err := wt.DiffSince(base)
 	if err != nil {
