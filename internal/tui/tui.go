@@ -940,21 +940,47 @@ func (m model) footer() string {
 		if len(m.items) == 0 {
 			return "q quit"
 		}
-		if m.agentCfg != nil {
-			keys := "j/k move · f mark fix · a approve · s skip · A all · N none · c copy · enter apply marked (edits files) · q quit"
-			// "f" marks a finding; "enter" applies (runs the agent on) everything
-			// marked — the labels spell out that mark-vs-apply distinction. While
-			// ask-user findings are undecided, the footer says what's at stake:
-			// the run stops before push until each has a decision.
-			if n := m.undecided(); n > 0 && m.dest == DestWorktree {
-				return fmt.Sprintf("decide %d ask-user finding(s) — the run won't push until each is fixed, approved, or skipped\n", n) + keys
-			}
-			return keys
-		}
-		return "j/k move · c copy · q quit"
+		return viewerFooter(len(m.pending()), m.undecided(), len(m.applied), m.dest, m.agentCfg != nil)
 	default:
 		return "q quit"
 	}
+}
+
+// viewerFooter decides what the findings viewer's footer says: which keys
+// apply right now, and — once every marked fix has been applied — the one
+// next action, so a session never ends with the user hesitating over what a
+// keypress will do. Pure so every state is a table row.
+//
+// "f" marks a finding; "enter" applies (runs the agent on) everything marked —
+// the labels spell out that mark-vs-apply distinction, and "enter" is offered
+// only while something is actually applicable.
+func viewerFooter(pending, undecided, applied int, dest Dest, hasAgent bool) string {
+	if !hasAgent {
+		return "j/k move · c copy · q quit"
+	}
+	keys := "j/k move · f mark fix · a approve · s skip · A all · N none · c copy"
+	if pending > 0 {
+		keys += " · enter apply marked (edits files)"
+	}
+	done := pending == 0 && applied > 0
+	if done && dest == DestWorktree {
+		// Quitting is how the run proceeds — say so instead of "quit".
+		keys += " · q continue"
+	} else {
+		keys += " · q quit"
+	}
+
+	switch {
+	// Undecided ask-user findings outrank the completion note: they are what
+	// the run is actually waiting on.
+	case undecided > 0 && dest == DestWorktree:
+		return fmt.Sprintf("decide %d ask-user finding(s) — the run won't push until each is fixed, approved, or skipped\n", undecided) + keys
+	case done && dest == DestWorktree:
+		return fmt.Sprintf("✓ %s applied — press q to continue: the checks re-run, then the fixes commit and push\n", plural(applied, "fix")) + keys
+	case done:
+		return fmt.Sprintf("✓ %s applied to your working tree — press q to quit, then review with `git diff` and commit\n", plural(applied, "fix")) + keys
+	}
+	return keys
 }
 
 // --- helpers -------------------------------------------------------------
@@ -1007,5 +1033,11 @@ func plural(n int, word string) string {
 	if n == 1 {
 		return "1 " + word
 	}
-	return fmt.Sprintf("%d %ss", n, word)
+	suffix := "s"
+	// Sibilant endings take "es": fix → fixes.
+	if strings.HasSuffix(word, "x") || strings.HasSuffix(word, "s") ||
+		strings.HasSuffix(word, "ch") || strings.HasSuffix(word, "sh") {
+		suffix = "es"
+	}
+	return fmt.Sprintf("%d %s%s", n, word, suffix)
 }
